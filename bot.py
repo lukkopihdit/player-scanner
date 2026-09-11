@@ -862,6 +862,91 @@ async def alliance(interaction: discord.Interaction, tag: str):
     )
 
 
+@bot.tree.command(name="alliancefile", description="Export every tracked alliance as a separate member file")
+async def alliancefile(interaction: discord.Interaction):
+    """Send one text file per tracked alliance, split across Discord messages."""
+    await interaction.response.defer(ephemeral=True)
+
+    alliances = await scanner.db.get_alliances(100)
+    if not alliances:
+        await interaction.followup.send(
+            "No tracked alliances are stored yet. Run `/scan` first.",
+            ephemeral=True,
+        )
+        return
+
+    prepared: list[tuple[str, discord.File, int]] = []
+
+    for row in alliances:
+        tag = (row["abbr"] or "").strip()
+        if not tag:
+            continue
+
+        members = await scanner.db.get_alliance_players(tag, 200)
+
+        lines = [
+            f"{member['governor_id'] or ''}, {member['nick_name'] or ''}, "
+            f"{member['town_center_level'] if member['town_center_level'] is not None else ''}, 810"
+            for member in members
+        ]
+
+        content = "\n".join(lines) + ("\n" if lines else "")
+        filename_tag = "".join(
+            ch if ch.isalnum() or ch in "-_" else "_"
+            for ch in tag
+        ) or "alliance"
+
+        file = discord.File(
+            io.BytesIO(content.encode("utf-8")),
+            filename=f"alliance_{filename_tag}_810.txt",
+        )
+        prepared.append((tag, file, len(members)))
+
+    if not prepared:
+        await interaction.followup.send(
+            "No alliance files could be created.",
+            ephemeral=True,
+        )
+        return
+
+    # Discord limits the number of attachments per message. Send batches of 10,
+    # keeping one file per alliance as requested.
+    total = len(prepared)
+    sent = 0
+
+    for start in range(0, total, 10):
+        batch = prepared[start:start + 10]
+        files = [item[1] for item in batch]
+        names = ", ".join(item[0] for item in batch)
+
+        if start == 0:
+            await interaction.followup.send(
+                content=(
+                    f"**Kingdom 810 alliance files**\n"
+                    f"Sending {total} alliance files in batches.\n"
+                    f"Batch {start // 10 + 1}: {names}"
+                ),
+                files=files,
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                content=(
+                    f"**Kingdom 810 alliance files**\n"
+                    f"Batch {start // 10 + 1}: {names}"
+                ),
+                files=files,
+                ephemeral=True,
+            )
+
+        sent += len(batch)
+
+    await interaction.followup.send(
+        f"Finished. Created {sent} separate alliance member files.",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="webhooktest", description="Send a test message to the notification channel")
 async def webhooktest(interaction: discord.Interaction):
     if not NOTIFY_CHANNEL_ID:

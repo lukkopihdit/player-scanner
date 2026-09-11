@@ -1,0 +1,9 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY kingshot_ids.py /app/kingshot_ids.py
+
+RUN mkdir -p /app/data
+
+CMD ["python", "/app/kingshot_ids.py"]

@@ -1,0 +1,9 @@
+services:
+  player-scanner:
+    build: .
+    container_name: player-scanner
+    restart: unless-stopped
+    environment:
+      API_KEYS: ${API_KEYS}
+    volumes:
+      - ./data:/app/data

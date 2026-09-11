@@ -1,9 +1,18 @@
 services:
   player-scanner:
-    build: .
+    build:
+      context: https://github.com/lukkopihdit/player-scanner.git
+
     container_name: player-scanner
+
     restart: unless-stopped
+
     environment:
       API_KEYS: ${API_KEYS}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+
     volumes:
-      - ./data:/app/data
+      - player-scanner-data:/app/data
+
+volumes:
+  player-scanner-data:

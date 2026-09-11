@@ -947,6 +947,118 @@ async def alliancefile(interaction: discord.Interaction):
     )
 
 
+
+@bot.tree.command(name="alliancefilemerged", description="Export top alliances separately and merge the rest into one file")
+@app_commands.describe(top_count="Number of top alliances to keep as individual files (1-99)")
+async def alliancefilemerged(
+    interaction: discord.Interaction,
+    top_count: app_commands.Range[int, 1, 99],
+):
+    """Create one file per top alliance and one merged file for the remainder."""
+    await interaction.response.defer(ephemeral=True)
+
+    alliances = await scanner.db.get_alliances(100)
+    if not alliances:
+        await interaction.followup.send(
+            "No tracked alliances are stored yet. Run `/scan` first.",
+            ephemeral=True,
+        )
+        return
+
+    # Keep the stored ranking order. The scanner stores alliance_power rank.
+    alliances = list(alliances[:100])
+    top = alliances[:top_count]
+    remainder = alliances[top_count:]
+
+    def safe_tag(tag: str) -> str:
+        cleaned = "".join(
+            ch if ch.isalnum() or ch in "-_" else "_"
+            for ch in tag
+        )
+        return cleaned or "alliance"
+
+    def member_lines(members):
+        return [
+            f"{member['governor_id'] or ''}, {member['nick_name'] or ''}, "
+            f"{member['town_center_level'] if member['town_center_level'] is not None else ''}, 810"
+            for member in members
+        ]
+
+    files: list[discord.File] = []
+    file_labels: list[str] = []
+
+    # One separate file for each selected top alliance.
+    for row in top:
+        tag = (row["abbr"] or "").strip()
+        if not tag:
+            continue
+
+        members = await scanner.db.get_alliance_players(tag, 200)
+        content = "\n".join(member_lines(members)) + ("\n" if members else "")
+        file = discord.File(
+            io.BytesIO(content.encode("utf-8")),
+            filename=f"alliance_{safe_tag(tag)}_810.txt",
+        )
+        files.append(file)
+        file_labels.append(tag)
+
+    # Everything below the selected range goes into one merged file.
+    if remainder:
+        merged_lines: list[str] = []
+
+        for row in remainder:
+            tag = (row["abbr"] or "").strip()
+            if not tag:
+                continue
+
+            members = await scanner.db.get_alliance_players(tag, 200)
+
+            # Keep exactly the same member format as the individual files.
+            merged_lines.extend(member_lines(members))
+
+        merged_content = "\n".join(merged_lines).rstrip() + "\n"
+
+        files.append(
+            discord.File(
+                io.BytesIO(merged_content.encode("utf-8")),
+                filename="alliances_rest_810.txt",
+            )
+        )
+        file_labels.append("REST")
+
+    if not files:
+        await interaction.followup.send(
+            "No alliance files could be created.",
+            ephemeral=True,
+        )
+        return
+
+    # Discord's attachment limit can vary by server/account. Keep batches small.
+    total_files = len(files)
+    sent = 0
+
+    for start in range(0, total_files, 10):
+        batch = files[start:start + 10]
+        labels = file_labels[start:start + 10]
+        label_text = ", ".join(labels)
+
+        await interaction.followup.send(
+            content=(
+                f"**Kingdom 810 alliance files**\n"
+                f"Top {top_count} individually; remaining {len(remainder)} alliances merged.\n"
+                f"Batch {start // 10 + 1}: {label_text}"
+            ),
+            files=batch,
+            ephemeral=True,
+        )
+        sent += len(batch)
+
+    await interaction.followup.send(
+        f"Finished. Created {sent} files: {len(top)} individual alliance files plus "
+        f"{1 if remainder else 0} merged remainder file.",
+        ephemeral=True,
+    )
+
 @bot.tree.command(name="webhooktest", description="Send a test message to the notification channel")
 async def webhooktest(interaction: discord.Interaction):
     if not NOTIFY_CHANNEL_ID:

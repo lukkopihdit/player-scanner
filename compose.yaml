@@ -1,0 +1,15 @@
+services:
+  player-scanner:
+    build: .
+    container_name: player-scanner
+    restart: unless-stopped
+    environment:
+      DISCORD_TOKEN: "PUT_DISCORD_BOT_TOKEN_HERE"
+      MIGHTPULSE_API_KEYS: "kss_KEY1,kss_KEY2,kss_KEY3"
+      NOTIFY_CHANNEL_ID: "123456789012345678"
+      DB_PATH: "/data/scanner.db"
+    volumes:
+      - scanner-data:/data
+
+volumes:
+  scanner-data:

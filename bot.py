@@ -862,9 +862,9 @@ async def alliance(interaction: discord.Interaction, tag: str):
     )
 
 
-@bot.tree.command(name="alliancefile", description="Export every tracked alliance as a separate member file")
+@bot.tree.command(name="alliancefile", description="Export every tracked alliance as a separate CSV member file")
 async def alliancefile(interaction: discord.Interaction):
-    """Send one text file per tracked alliance, split across Discord messages."""
+    """Send one CSV file per tracked alliance, split across Discord messages."""
     await interaction.response.defer(ephemeral=True)
 
     alliances = await scanner.db.get_alliances(100)
@@ -875,7 +875,16 @@ async def alliancefile(interaction: discord.Interaction):
         )
         return
 
+    header = "ID,Name,TC Level,Kingdom,Power,Power Updated,Combat Power,Combat Power Updated\n"
     prepared: list[tuple[str, discord.File, int]] = []
+
+    def csv_value(value):
+        if value is None:
+            return ""
+        text = str(value)
+        if any(ch in text for ch in [',', '"', '\n', '\r']):
+            text = '"' + text.replace('"', '""') + '"'
+        return text
 
     for row in alliances:
         tag = (row["abbr"] or "").strip()
@@ -883,22 +892,31 @@ async def alliancefile(interaction: discord.Interaction):
             continue
 
         members = await scanner.db.get_alliance_players(tag, 200)
+        lines = [header.rstrip("\n")]
 
-        lines = [
-            f"{member['governor_id'] or ''}, {member['nick_name'] or ''}, "
-            f"{member['town_center_level'] if member['town_center_level'] is not None else ''}, 810"
-            for member in members
-        ]
+        for member in members:
+            lines.append(
+                ",".join([
+                    csv_value(member["governor_id"]),
+                    csv_value(member["nick_name"]),
+                    csv_value(member["town_center_level"]),
+                    "810",
+                    csv_value(member["power"]),
+                    "",
+                    "",
+                    "",
+                ])
+            )
 
-        content = "\n".join(lines) + ("\n" if lines else "")
+        content = "\n".join(lines) + "\n"
         filename_tag = "".join(
             ch if ch.isalnum() or ch in "-_" else "_"
             for ch in tag
         ) or "alliance"
 
         file = discord.File(
-            io.BytesIO(content.encode("utf-8")),
-            filename=f"alliance_{filename_tag}_810.txt",
+            io.BytesIO(content.encode("utf-8-sig")),
+            filename=f"alliance_{filename_tag}_810.csv",
         )
         prepared.append((tag, file, len(members)))
 
@@ -909,8 +927,6 @@ async def alliancefile(interaction: discord.Interaction):
         )
         return
 
-    # Discord limits the number of attachments per message. Send batches of 10,
-    # keeping one file per alliance as requested.
     total = len(prepared)
     sent = 0
 
@@ -919,42 +935,29 @@ async def alliancefile(interaction: discord.Interaction):
         files = [item[1] for item in batch]
         names = ", ".join(item[0] for item in batch)
 
-        if start == 0:
-            await interaction.followup.send(
-                content=(
-                    f"**Kingdom 810 alliance files**\n"
-                    f"Sending {total} alliance files in batches.\n"
-                    f"Batch {start // 10 + 1}: {names}"
-                ),
-                files=files,
-                ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(
-                content=(
-                    f"**Kingdom 810 alliance files**\n"
-                    f"Batch {start // 10 + 1}: {names}"
-                ),
-                files=files,
-                ephemeral=True,
-            )
-
+        await interaction.followup.send(
+            content=(
+                f"**Kingdom 810 alliance CSV files**\n"
+                f"Batch {start // 10 + 1}: {names}"
+            ),
+            files=files,
+            ephemeral=True,
+        )
         sent += len(batch)
 
     await interaction.followup.send(
-        f"Finished. Created {sent} separate alliance member files.",
+        f"Finished. Created {sent} separate CSV alliance files.",
         ephemeral=True,
     )
 
 
-
-@bot.tree.command(name="alliancefilemerged", description="Export top alliances separately and merge the rest into one file")
+@bot.tree.command(name="alliancefilemerged", description="Export top alliances separately and merge the rest into one CSV")
 @app_commands.describe(top_count="Number of top alliances to keep as individual files (1-99)")
 async def alliancefilemerged(
     interaction: discord.Interaction,
     top_count: app_commands.Range[int, 1, 99],
 ):
-    """Create one file per top alliance and one merged file for the remainder."""
+    """Create one CSV per selected top alliance and one merged CSV for the remainder."""
     await interaction.response.defer(ephemeral=True)
 
     alliances = await scanner.db.get_alliances(100)
@@ -965,10 +968,11 @@ async def alliancefilemerged(
         )
         return
 
-    # Keep the stored ranking order. The scanner stores alliance_power rank.
     alliances = list(alliances[:100])
     top = alliances[:top_count]
     remainder = alliances[top_count:]
+
+    header = "ID,Name,TC Level,Kingdom,Power,Power Updated,Combat Power,Combat Power Updated\n"
 
     def safe_tag(tag: str) -> str:
         cleaned = "".join(
@@ -977,34 +981,52 @@ async def alliancefilemerged(
         )
         return cleaned or "alliance"
 
-    def member_lines(members):
-        return [
-            f"{member['governor_id'] or ''}, {member['nick_name'] or ''}, "
-            f"{member['town_center_level'] if member['town_center_level'] is not None else ''}, 810"
-            for member in members
-        ]
+    def csv_value(value):
+        if value is None:
+            return ""
+        text = str(value)
+        if any(ch in text for ch in [',', '"', '\n', '\r']):
+            text = '"' + text.replace('"', '""') + '"'
+        return text
+
+    def member_csv(members):
+        lines = [header.rstrip("\n")]
+        for member in members:
+            lines.append(
+                ",".join([
+                    csv_value(member["governor_id"]),
+                    csv_value(member["nick_name"]),
+                    csv_value(member["town_center_level"]),
+                    "810",
+                    csv_value(member["power"]),
+                    "",
+                    "",
+                    "",
+                ])
+            )
+        return "\n".join(lines) + "\n"
 
     files: list[discord.File] = []
     file_labels: list[str] = []
 
-    # One separate file for each selected top alliance.
     for row in top:
         tag = (row["abbr"] or "").strip()
         if not tag:
             continue
 
         members = await scanner.db.get_alliance_players(tag, 200)
-        content = "\n".join(member_lines(members)) + ("\n" if members else "")
-        file = discord.File(
-            io.BytesIO(content.encode("utf-8")),
-            filename=f"alliance_{safe_tag(tag)}_810.txt",
+        content = member_csv(members)
+
+        files.append(
+            discord.File(
+                io.BytesIO(content.encode("utf-8-sig")),
+                filename=f"alliance_{safe_tag(tag)}_810.csv",
+            )
         )
-        files.append(file)
         file_labels.append(tag)
 
-    # Everything below the selected range goes into one merged file.
     if remainder:
-        merged_lines: list[str] = []
+        merged_lines = [header.rstrip("\n")]
 
         for row in remainder:
             tag = (row["abbr"] or "").strip()
@@ -1013,15 +1035,26 @@ async def alliancefilemerged(
 
             members = await scanner.db.get_alliance_players(tag, 200)
 
-            # Keep exactly the same member format as the individual files.
-            merged_lines.extend(member_lines(members))
+            for member in members:
+                merged_lines.append(
+                    ",".join([
+                        csv_value(member["governor_id"]),
+                        csv_value(member["nick_name"]),
+                        csv_value(member["town_center_level"]),
+                        "810",
+                        csv_value(member["power"]),
+                        "",
+                        "",
+                        "",
+                    ])
+                )
 
-        merged_content = "\n".join(merged_lines).rstrip() + "\n"
+        merged_content = "\n".join(merged_lines) + "\n"
 
         files.append(
             discord.File(
-                io.BytesIO(merged_content.encode("utf-8")),
-                filename="alliances_rest_810.txt",
+                io.BytesIO(merged_content.encode("utf-8-sig")),
+                filename="alliances_rest_810.csv",
             )
         )
         file_labels.append("REST")
@@ -1033,20 +1066,19 @@ async def alliancefilemerged(
         )
         return
 
-    # Discord's attachment limit can vary by server/account. Keep batches small.
     total_files = len(files)
     sent = 0
 
     for start in range(0, total_files, 10):
         batch = files[start:start + 10]
         labels = file_labels[start:start + 10]
-        label_text = ", ".join(labels)
 
         await interaction.followup.send(
             content=(
-                f"**Kingdom 810 alliance files**\n"
-                f"Top {top_count} individually; remaining {len(remainder)} alliances merged.\n"
-                f"Batch {start // 10 + 1}: {label_text}"
+                f"**Kingdom 810 alliance CSV files**\n"
+                f"Top {top_count} individually; remaining "
+                f"{len(remainder)} alliances merged.\n"
+                f"Batch {start // 10 + 1}: {', '.join(labels)}"
             ),
             files=batch,
             ephemeral=True,
@@ -1054,10 +1086,11 @@ async def alliancefilemerged(
         sent += len(batch)
 
     await interaction.followup.send(
-        f"Finished. Created {sent} files: {len(top)} individual alliance files plus "
-        f"{1 if remainder else 0} merged remainder file.",
+        f"Finished. Created {sent} CSV files: {len(top)} individual "
+        f"alliance files plus {1 if remainder else 0} merged remainder file.",
         ephemeral=True,
     )
+
 
 @bot.tree.command(name="webhooktest", description="Send a test message to the notification channel")
 async def webhooktest(interaction: discord.Interaction):

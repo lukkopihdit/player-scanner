@@ -5,6 +5,7 @@ import math
 import os
 import time
 import urllib.parse
+from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -2267,35 +2268,33 @@ async def kvkopponent(
             }
 
             def metric_line(label, ours_value, opp_value):
-                if ours_value is not None and opp_value is not None:
-                    if ours_value > opp_value:
-                        ours_mark, opp_mark = "✓", " "
-                    elif opp_value > ours_value:
-                        ours_mark, opp_mark = " ", "✓"
-                    else:
-                        ours_mark, opp_mark = "=", "="
-                elif ours_value is not None:
-                    ours_mark, opp_mark = "✓", " "
-                elif opp_value is not None:
-                    ours_mark, opp_mark = " ", "✓"
-                else:
-                    ours_mark, opp_mark = " ", " "
+                # Do not use fixed-width columns here. Discord mobile wraps
+                # whitespace aggressively, which makes aligned tables unreadable.
                 ours_text = compact_number(ours_value) if ours_value is not None else "-"
                 opp_text = compact_number(opp_value) if opp_value is not None else "-"
-                return f"    {label:<12} {ours_mark}{ours_text:>10}   {opp_mark}{opp_text:>10}"
+                if ours_value is not None and opp_value is not None:
+                    if ours_value > opp_value:
+                        return f"    {label}: 810 {ours_text} ✓ · {kingdom} {opp_text}"
+                    if opp_value > ours_value:
+                        return f"    {label}: 810 {ours_text} · {kingdom} {opp_text} ✓"
+                    return f"    {label}: 810 {ours_text} = {kingdom} {opp_text}"
+                if ours_value is not None:
+                    return f"    {label}: 810 {ours_text} ✓ · {kingdom} -"
+                if opp_value is not None:
+                    return f"    {label}: 810 - · {kingdom} {opp_text} ✓"
+                return f"    {label}: 810 - · {kingdom} -"
 
             block = [
                 f"#{idx}",
                 f"810 [{ours_tag}]{ours_name}",
-                f"    TC: {detail_value(ours_player, 'town_center_level')}",
+                f"    {level_label(detail_value(ours_player, 'town_center_level'))}",
                 f"    Mystic Trial: {ours_mystic} · Rank: {ours_mystic_rank}",
                 "",
                 f"{kingdom} [{opp_tag}]{opp_name}",
-                f"    TC: {detail_value(opp_player, 'town_center_level')}",
+                f"    {level_label(detail_value(opp_player, 'town_center_level'))}",
                 f"    Mystic Trial: {opp_mystic} · Rank: {opp_mystic_rank}",
                 "",
                 "    Power comparison",
-                f"    {'Metric':<12} {'810':>11}   {str(kingdom):>11}",
                 metric_line("Hero Power", ours_metric_values["Hero Power"], opp_metric_values["Hero Power"]),
                 metric_line("Research", ours_metric_values["Research"], opp_metric_values["Research"]),
                 metric_line("Gov. Gear", ours_metric_values["Gov. Gear"], opp_metric_values["Gov. Gear"]),
@@ -2311,6 +2310,187 @@ async def kvkopponent(
             block.append("")
             block.extend(hero_block(opp_detail))
             detail_blocks.append("\n".join(block))
+
+
+    def _font(size: int, bold: bool = False):
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        return ImageFont.load_default()
+
+    def _draw_wrapped(draw, text, xy, font, fill=(20, 20, 20), max_width=1400, line_gap=6):
+        x, y = xy
+        words = str(text).split()
+        lines = []
+        current = ""
+        for word in words:
+            test = word if not current else current + " " + word
+            if draw.textbbox((0, 0), test, font=font)[2] <= max_width:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        for line in lines:
+            draw.text((x, y), line, font=font, fill=fill)
+            y += draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] + line_gap
+        return y
+
+    def _metric_winner(a, b):
+        if a is None or b is None:
+            return ""
+        if a > b:
+            return "810"
+        if b > a:
+            return str(kingdom)
+        return "="
+
+    def _render_kvk_images(detail_rows, kingdom_id):
+        """Render clean, plain comparison images. Five player pairs per image."""
+        images = []
+        if not detail_rows:
+            return images
+        title_font = _font(42, True)
+        subtitle_font = _font(27, True)
+        section_font = _font(25, True)
+        body_font = _font(22)
+        body_bold = _font(22, True)
+        small_font = _font(18)
+        width = 1500
+        chunk_size = 5
+
+        def component_value(row, player, index, label):
+            for source in (row, player):
+                if not isinstance(source, dict):
+                    continue
+                for key in ("governor_id", "uid"):
+                    value = source.get(key)
+                    if value is not None:
+                        score = index.get(label, {}).get(str(value))
+                        if score is not None:
+                            return score
+            return None
+
+        def player_info(row, data):
+            player = data.get("player", {}) if isinstance(data, dict) else {}
+            ranks = data.get("ranks", {}) if isinstance(data, dict) else {}
+            alliance = player.get("alliance") or {}
+            name = player.get("nick_name") or row.get("nick_name") or "-"
+            tag = alliance.get("abbr") or row.get("alliance_abbr") or "-"
+            level = player.get("town_center_level")
+            mystic = ranks.get("mystic_trial")
+            mystic_rank = ranks.get("mystic_rank")
+            return player, name, tag, level, mystic, mystic_rank
+
+        def heroes(data):
+            hs = data.get("heroes") if isinstance(data, dict) else None
+            return hs[:5] if isinstance(hs, list) else []
+
+        def gear(hero):
+            vals = {}
+            for item in hero.get("gear") or []:
+                if isinstance(item, dict):
+                    slot = str(item.get("slot") or item.get("name") or "").lower()
+                    enh, ref = item.get("enhancement_level"), item.get("refine_level")
+                    if enh is None and ref is None:
+                        value = "-"
+                    elif ref is None:
+                        value = f"+{enh}"
+                    elif enh is None:
+                        value = f"R{ref}"
+                    else:
+                        value = f"+{enh}/R{ref}"
+                    for key in ("helmet", "gloves", "armor", "boots"):
+                        if key in slot:
+                            vals[key] = value
+            return vals
+
+        for chunk_start in range(0, len(detail_rows), chunk_size):
+            chunk = detail_rows[chunk_start:chunk_start + chunk_size]
+            rows_render = []
+            for idx, (orow, od, prow, pd) in enumerate(chunk, chunk_start + 1):
+                op, oname, otag, olvl, omystic, orank = player_info(orow, od)
+                pp, pname, ptag, plvl, pmystic, prank = player_info(prow, pd)
+                metrics = [
+                    ("Hero Power", orow.get("score"), prow.get("score")),
+                    ("Research", component_value(orow, op, our_component_index, "Research"), component_value(prow, pp, opp_component_index, "Research")),
+                    ("Gov. Gear", component_value(orow, op, our_component_index, "Gov. Gear"), component_value(prow, pp, opp_component_index, "Gov. Gear")),
+                    ("Gov. Charm", component_value(orow, op, our_component_index, "Gov. Charm"), component_value(prow, pp, opp_component_index, "Gov. Charm")),
+                    ("Pet Power", component_value(orow, op, our_component_index, "Pet Power"), component_value(prow, pp, opp_component_index, "Pet Power")),
+                ]
+                rows_render.append((idx, op, oname, otag, olvl, omystic, orank, pp, pname, ptag, plvl, pmystic, prank, metrics))
+
+            # Estimate height based on content. Plain white report, intentionally no decorative nonsense.
+            height = 180 + len(rows_render) * 560
+            img = Image.new("RGB", (width, height), "white")
+            draw = ImageDraw.Draw(img)
+            margin = 36
+            y = 28
+            draw.text((margin, y), "KvK Opponent Comparison", font=title_font, fill=(15, 15, 15)); y += 52
+            draw.text((margin, y), f"Kingdom 810 vs Kingdom {kingdom_id}", font=subtitle_font, fill=(30, 30, 30)); y += 42
+            draw.text((margin, y), f"Detailed comparison · #{chunk_start + 1}–#{chunk_start + len(chunk)}", font=body_font, fill=(70, 70, 70)); y += 38
+            draw.line((margin, y, width-margin, y), fill=(180,180,180), width=2); y += 22
+
+            for item in rows_render:
+                idx, op, oname, otag, olvl, omystic, orank, pp, pname, ptag, plvl, pmystic, prank, metrics = item
+                card_top = y
+                draw.rectangle((margin, card_top, width-margin, card_top+520), outline=(190,190,190), width=2)
+                draw.rectangle((margin, card_top, width-margin, card_top+48), fill=(235,235,235))
+                draw.text((margin+14, card_top+10), f"#{idx}", font=section_font, fill=(15,15,15))
+                y = card_top + 62
+                col_w = (width - 2*margin - 24) // 2
+                left_x = margin + 12
+                right_x = margin + 12 + col_w + 12
+                draw.text((left_x, y), f"810 [{otag}]{oname}", font=body_bold, fill=(15,15,15))
+                draw.text((right_x, y), f"{kingdom_id} [{ptag}]{pname}", font=body_bold, fill=(15,15,15)); y += 34
+                draw.text((left_x, y), level_label(olvl), font=body_font, fill=(35,35,35))
+                draw.text((right_x, y), level_label(plvl), font=body_font, fill=(35,35,35)); y += 30
+                draw.text((left_x, y), f"Mystic Trial: {omystic if omystic is not None else '-'} · Rank: {orank if orank is not None else '-'}", font=small_font, fill=(60,60,60))
+                draw.text((right_x, y), f"Mystic Trial: {pmystic if pmystic is not None else '-'} · Rank: {prank if prank is not None else '-'}", font=small_font, fill=(60,60,60)); y += 38
+                draw.text((left_x, y), "Power Comparison", font=section_font, fill=(20,20,20)); y += 30
+                for label, a, b in metrics:
+                    winner = _metric_winner(a, b)
+                    at = compact_number(a) if a is not None else "-"
+                    bt = compact_number(b) if b is not None else "-"
+                    result = "=" if winner == "=" else (f"✓ {winner}" if winner else "")
+                    draw.text((left_x, y), f"{label}: {at}", font=small_font, fill=(30,30,30))
+                    draw.text((right_x, y), f"{bt}  {result}", font=small_font, fill=(30,30,30)); y += 25
+
+                y += 10
+                # Arena tables, side-by-side, compact like the reference image.
+                draw.text((left_x, y), "Arena", font=section_font, fill=(20,20,20))
+                draw.text((right_x, y), "Arena", font=section_font, fill=(20,20,20)); y += 30
+                left_h = heroes(od); right_h = heroes(pd)
+                for pos in range(5):
+                    lh = left_h[pos] if pos < len(left_h) else None
+                    rh = right_h[pos] if pos < len(right_h) else None
+                    if lh:
+                        g = gear(lh)
+                        txt = f"{pos+1}. {lh.get('name','Unknown')} · Widget: {lh.get('exclusive_gear_level','-')}"
+                        draw.text((left_x, y), txt, font=small_font, fill=(30,30,30))
+                        draw.text((left_x, y+21), f"Helmet {g.get('helmet','-')} · Gloves {g.get('gloves','-')}", font=_font(16), fill=(70,70,70))
+                        draw.text((left_x, y+40), f"Armor {g.get('armor','-')} · Boots {g.get('boots','-')}", font=_font(16), fill=(70,70,70))
+                    if rh:
+                        g = gear(rh)
+                        txt = f"{pos+1}. {rh.get('name','Unknown')} · Widget: {rh.get('exclusive_gear_level','-')}"
+                        draw.text((right_x, y), txt, font=small_font, fill=(30,30,30))
+                        draw.text((right_x, y+21), f"Helmet {g.get('helmet','-')} · Gloves {g.get('gloves','-')}", font=_font(16), fill=(70,70,70))
+                        draw.text((right_x, y+40), f"Armor {g.get('armor','-')} · Boots {g.get('boots','-')}", font=_font(16), fill=(70,70,70))
+                    y += 66
+                y = card_top + 540
+            # Crop excess whitespace
+            img = img.crop((0, 0, width, min(y + 20, height)))
+            bio = io.BytesIO()
+            img.save(bio, format="PNG", optimize=True)
+            bio.seek(0)
+            images.append(bio)
+        return images
 
     # Send deliberate public sections. The initial links, kingdom comparison,
     # rough top-20 comparison, and each detailed top-5 block are separate
@@ -2339,29 +2519,21 @@ async def kvkopponent(
             await send_section(rough)
 
         if detail_blocks:
-            await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
-            for block in detail_blocks:
-                # Discord's normal message content limit is 2000 characters.
-                # Keep every code block safely below that limit, splitting only
-                # at whole lines so hero/gear information is never cut in half.
-                lines_block = block.split("\n")
-                chunks = []
-                current = []
-                current_len = len("```text\n") + len("\n```")
-                for line in lines_block:
-                    extra = len(line) + (1 if current else 0)
-                    if current and current_len + extra >= 1900:
-                        chunks.append("\n".join(current))
-                        current = []
-                        current_len = len("```text\n") + len("\n```")
-                    current.append(line)
-                    current_len += extra
-                if current:
-                    chunks.append("\n".join(current))
-
-                for chunk_index, chunk in enumerate(chunks, 1):
-                    suffix = f"\nPart {chunk_index}/{len(chunks)}" if len(chunks) > 1 else ""
-                    await send_section(f"```text\n{chunk}{suffix}\n```")
+            try:
+                report_images = _render_kvk_images(detail_rows, kingdom)
+                if report_images:
+                    for image_index, image_buffer in enumerate(report_images, 1):
+                        filename = f"kvk_{KINGDOM_ID}_vs_{kingdom}_part_{image_index}.png"
+                        file = discord.File(image_buffer, filename=filename)
+                        if target_channel is not None:
+                            await target_channel.send(file=file)
+                        else:
+                            await interaction.followup.send(file=file, ephemeral=False)
+                else:
+                    await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
+            except Exception as exc:
+                print(f"Could not render KvK comparison image: {exc}", flush=True)
+                await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
 
     if target_channel is not None:
         await interaction.followup.send(

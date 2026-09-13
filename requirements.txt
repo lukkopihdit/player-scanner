@@ -1,3 +1,4 @@
 discord.py>=2.6,<3
 aiohttp>=3.10,<4
 aiosqlite>=0.20,<1
+Pillow>=11,<13

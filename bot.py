@@ -1850,24 +1850,30 @@ async def kvkopponent(
         # Kingdom-level comparison intentionally excludes troop power.
         # For these comparisons, use only the top 100 player-ranked contribution
         # for each kingdom rather than the kingdom-wide totals. Troop Power is excluded.
-        async def top100_sum(board: str, kingdom_id: int):
+        async def get_rank_rows(board: str, kingdom_id: int):
             data = await scanner.api.get(f"/kingdoms/{kingdom_id}/ranks?board={board}&limit=100")
-            rows = data.get("boards", [{}])[0].get("rows", []) if data else []
-            return sum((row.get("score") or 0) for row in rows[:100])
+            return data.get("boards", [{}])[0].get("rows", [])[:100] if data else []
 
-        top100_metrics = {}
-        for board, label in [
+        async def top100_sum(board: str, kingdom_id: int):
+            rows = await get_rank_rows(board, kingdom_id)
+            return sum((row.get("score") or 0) for row in rows)
+
+        metric_specs = [
             ("hero_total", "Hero Power"),
             ("research_power", "Research Power"),
             ("gov_gear", "Governor Gear"),
             ("gov_charm", "Governor Charm"),
             ("pet_power", "Pet Power"),
-        ]:
-            our_value, opp_value = await asyncio.gather(
-                top100_sum(board, KINGDOM_ID),
-                top100_sum(board, kingdom),
-            )
-            top100_metrics[label] = (our_value, opp_value)
+        ]
+        metric_jobs = []
+        for board, label in metric_specs:
+            metric_jobs.append(top100_sum(board, KINGDOM_ID))
+            metric_jobs.append(top100_sum(board, kingdom))
+        metric_results = await asyncio.gather(*metric_jobs)
+        top100_metrics = {
+            label: (metric_results[i * 2], metric_results[i * 2 + 1])
+            for i, (_, label) in enumerate(metric_specs)
+        }
 
         lines.append("\n**Quick Kingdom Comparison · no troop power**")
         lines.append("```text")
@@ -1891,9 +1897,9 @@ async def kvkopponent(
         our_top20 = our_top100[:20]
 
         # Top-100 Truegold distribution. The hero_total leaderboard does not
-        # include town_center_level, so obtain that field separately for the
-        # exact same top-100 Hero Power players. Kingdom 810 uses the local
-        # hourly database; the opponent requires lightweight base lookups.
+        # include Town Center level. Instead of making 100 individual player
+        # requests, fetch the kingdom's Town Center leaderboard once and
+        # intersect it with the exact same top-100 Hero Power players.
         def tg_bucket(level):
             try:
                 level = int(level)
@@ -1903,38 +1909,29 @@ async def kvkopponent(
                 return None
             return ((level - 35) // 5) + 1
 
-        our_ids = [
-            str(row.get("governor_id"))
-            for row in our_top100
-            if row.get("governor_id") is not None
-        ]
-        our_db_players = await scanner.db.get_players_by_governor_ids(our_ids)
+        async def get_top100_board_index(board: str, kingdom_id: int):
+            rows = await get_rank_rows(board, kingdom_id)
+            index = {}
+            for row in rows:
+                score = row.get("score")
+                if score is None:
+                    continue
+                for key in ("governor_id", "uid"):
+                    value = row.get(key)
+                    if value is not None:
+                        index[str(value)] = score
+            return index
 
-        async def fetch_top100_base(rows):
-            result = {}
-            for batch_start in range(0, min(100, len(rows)), 20):
-                batch = rows[batch_start:batch_start + 20]
+        our_tc_index, opp_tc_index = await asyncio.gather(
+            get_top100_board_index("town_center", KINGDOM_ID),
+            get_top100_board_index("town_center", kingdom),
+        )
 
-                async def fetch_one(row):
-                    uid = row.get("uid")
-                    if not uid:
-                        return None, {}
-                    try:
-                        data = await scanner.api.get_player_base(str(uid), "uid")
-                        return str(uid), (data.get("player", {}) if data else {})
-                    except Exception as exc:
-                        print(f"Top-100 base lookup failed for UID {uid}: {exc}", flush=True)
-                        return str(uid), {}
+        our_db_players = await scanner.db.get_players_by_governor_ids(
+            [str(row.get("governor_id")) for row in our_top100 if row.get("governor_id") is not None]
+        )
 
-                fetched = await asyncio.gather(*(fetch_one(row) for row in batch))
-                for uid, player_data in fetched:
-                    if uid:
-                        result[uid] = player_data
-            return result
-
-        opponent_base = await fetch_top100_base(opponent_top100)
-
-        def tg_distribution(rows, db_players=None, base_players=None):
+        def tg_distribution(rows, db_players=None, tc_index=None):
             counts = {}
             for row in rows[:100]:
                 level = None
@@ -1944,15 +1941,18 @@ async def kvkopponent(
                     saved = db_players.get(str(gov_id))
                     if saved:
                         level = saved["town_center_level"]
-                if level is None and base_players is not None and uid is not None:
-                    level = (base_players.get(str(uid)) or {}).get("town_center_level")
+                if level is None and tc_index is not None:
+                    if gov_id is not None:
+                        level = tc_index.get(str(gov_id))
+                    if level is None and uid is not None:
+                        level = tc_index.get(str(uid))
                 tg = tg_bucket(level)
                 if tg is not None:
                     counts[tg] = counts.get(tg, 0) + 1
             return counts
 
-        our_tg = tg_distribution(our_top100, db_players=our_db_players)
-        opp_tg = tg_distribution(opponent_top100, base_players=opponent_base)
+        our_tg = tg_distribution(our_top100, db_players=our_db_players, tc_index=our_tc_index)
+        opp_tg = tg_distribution(opponent_top100, tc_index=opp_tc_index)
 
         lines.append("\n**Top 100 Hero Power · Truegold distribution**")
         lines.append("```text")
@@ -1985,6 +1985,38 @@ async def kvkopponent(
             )
         lines.append("```")
 
+        # Fetch the component leaderboards once and match the top-5 players to
+        # their scores by governor ID/UID. The individual player API does not
+        # expose research/governor-gear/charm/pet power directly, while these
+        # kingdom ranking boards do.
+        component_boards = [
+            ("research_power", "Research"),
+            ("gov_gear", "Gov. Gear"),
+            ("gov_charm", "Gov. Charm"),
+            ("pet_power", "Pet Power"),
+        ]
+
+        async def build_rank_index(kingdom_id: int):
+            results = await asyncio.gather(
+                *(get_rank_rows(board, kingdom_id) for board, _ in component_boards)
+            )
+            index = {label: {} for _, label in component_boards}
+            for (board, label), rows in zip(component_boards, results):
+                for rank_row in rows:
+                    score = rank_row.get("score")
+                    if score is None:
+                        continue
+                    for key in ("governor_id", "uid"):
+                        value = rank_row.get(key)
+                        if value is not None:
+                            index[label][str(value)] = score
+            return index
+
+        our_component_index, opp_component_index = await asyncio.gather(
+            build_rank_index(KINGDOM_ID),
+            build_rank_index(kingdom),
+        )
+
         # Detailed top-5 comparison. Fetch full base/ranks data only for the
         # 10 players involved, keeping this optional and bounded.
         async def fetch_detail(row):
@@ -2014,14 +2046,21 @@ async def kvkopponent(
                 )
             return {}
 
-        detail_rows = []
-        for idx in range(5):
-            our_row = our_top20[idx] if idx < len(our_top20) else None
-            opp_row = opponent_top20[idx] if idx < len(opponent_top20) else None
-            our_detail, opp_detail = await asyncio.gather(
-                fetch_detail(our_row) if our_row else asyncio.sleep(0, result={}),
-                fetch_detail(opp_row) if opp_row else asyncio.sleep(0, result={}),
+        pair_rows = [
+            (
+                our_top20[idx] if idx < len(our_top20) else None,
+                opponent_top20[idx] if idx < len(opponent_top20) else None,
             )
+            for idx in range(5)
+        ]
+        detail_results = await asyncio.gather(
+            *(fetch_detail(row) if row else asyncio.sleep(0, result={})
+              for pair in pair_rows for row in pair)
+        )
+        detail_rows = []
+        for idx, (our_row, opp_row) in enumerate(pair_rows):
+            our_detail = detail_results[idx * 2]
+            opp_detail = detail_results[idx * 2 + 1]
             detail_rows.append((our_row or {}, our_detail, opp_row or {}, opp_detail))
 
         def detail_player(row, data):
@@ -2067,7 +2106,8 @@ async def kvkopponent(
                     continue
                 shown += 1
                 name = hero.get("name") or "Unknown"
-                power = compact_number(hero.get("power"))
+                hero_power = hero.get("power")
+                power = compact_number(hero_power) if hero_power is not None else "-"
                 widget = hero.get("exclusive_gear_level")
                 out.append(f"{position}. {name} · {power}")
                 out.append(f"   Widget: {widget if widget is not None else '-'}")
@@ -2104,33 +2144,32 @@ async def kvkopponent(
             ours_mystic_rank = ours_ranks.get("mystic_rank", "-")
             opp_mystic_rank = opp_ranks.get("mystic_rank", "-")
 
-            # These five kingdom/player power categories are useful in the detailed
-            # matchup. Compare the actual player values and mark the higher one.
-            def metric_value(player, row, *keys):
-                for source in (player, row):
+            def leaderboard_component_value(row, player, index, label):
+                # The ranking rows normally expose both governor_id and uid.
+                for source in (row, player):
                     if not isinstance(source, dict):
                         continue
-                    for key in keys:
+                    for key in ("governor_id", "uid"):
                         value = source.get(key)
                         if value is not None:
-                            return value
+                            score = index.get(label, {}).get(str(value))
+                            if score is not None:
+                                return score
                 return None
 
-            # Hero Power is the leaderboard score, while the other four values
-            # come from the detailed player record when available.
             ours_metric_values = {
                 "Hero Power": our_row.get("score"),
-                "Research": metric_value(ours_player, our_row, "research_power"),
-                "Gov. Gear": metric_value(ours_player, our_row, "governor_gear_power", "gov_gear_power"),
-                "Gov. Charm": metric_value(ours_player, our_row, "governor_charm_power", "gov_charm_power"),
-                "Pet Power": metric_value(ours_player, our_row, "pet_power"),
+                "Research": leaderboard_component_value(our_row, ours_player, our_component_index, "Research"),
+                "Gov. Gear": leaderboard_component_value(our_row, ours_player, our_component_index, "Gov. Gear"),
+                "Gov. Charm": leaderboard_component_value(our_row, ours_player, our_component_index, "Gov. Charm"),
+                "Pet Power": leaderboard_component_value(our_row, ours_player, our_component_index, "Pet Power"),
             }
             opp_metric_values = {
                 "Hero Power": opp_row.get("score"),
-                "Research": metric_value(opp_player, opp_row, "research_power"),
-                "Gov. Gear": metric_value(opp_player, opp_row, "governor_gear_power", "gov_gear_power"),
-                "Gov. Charm": metric_value(opp_player, opp_row, "governor_charm_power", "gov_charm_power"),
-                "Pet Power": metric_value(opp_player, opp_row, "pet_power"),
+                "Research": leaderboard_component_value(opp_row, opp_player, opp_component_index, "Research"),
+                "Gov. Gear": leaderboard_component_value(opp_row, opp_player, opp_component_index, "Gov. Gear"),
+                "Gov. Charm": leaderboard_component_value(opp_row, opp_player, opp_component_index, "Gov. Charm"),
+                "Pet Power": leaderboard_component_value(opp_row, opp_player, opp_component_index, "Pet Power"),
             }
 
             def metric_line(label, ours_value, opp_value):
@@ -2163,9 +2202,9 @@ async def kvkopponent(
             # Keep the Arena details grouped under each kingdom after the compact
             # player/power comparison so the important matchup numbers are easy
             # to find.
-            block.extend(f"810 {line}" for line in hero_block(our_detail))
+            block.extend(hero_block(our_detail))
             block.append("")
-            block.extend(f"{kingdom} {line}" for line in hero_block(opp_detail))
+            block.extend(hero_block(opp_detail))
             detail_blocks.append("\n".join(block))
 
     # Send deliberate public sections. The initial links, kingdom comparison,

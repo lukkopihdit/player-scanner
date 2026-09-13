@@ -234,6 +234,13 @@ class ApiClient:
             query += "&id_type=" + urllib.parse.quote(id_type, safe="")
         return await self.get(f"/players/{encoded}{query}")
 
+    async def get_player_base(self, identifier: str, id_type: str = "uid"):
+        encoded = urllib.parse.quote(identifier.strip(), safe="")
+        query = "?include=base"
+        if id_type:
+            query += "&id_type=" + urllib.parse.quote(id_type, safe="")
+        return await self.get(f"/players/{encoded}{query}")
+
 
 class Database:
     def __init__(self, path: str):
@@ -316,6 +323,19 @@ class Database:
 
     async def get_player(self, governor_id: str):
         return await self.player_snapshot(governor_id)
+
+    async def get_players_by_governor_ids(self, governor_ids: list[str]):
+        if not governor_ids:
+            return {}
+        placeholders = ",".join("?" for _ in governor_ids)
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                f"SELECT * FROM players WHERE governor_id IN ({placeholders})",
+                [str(x) for x in governor_ids],
+            )
+            rows = await cur.fetchall()
+            return {str(row["governor_id"]): row for row in rows}
 
     async def get_alliances(self, limit: int = 100):
         async with aiosqlite.connect(self.path) as db:
@@ -830,11 +850,12 @@ class Scanner:
             else:
                 title = "Kingdom 810 level increase"
                 old_display, new_display = f"Lv. {old}", f"Lv. {new}"
+            player_name = c.get("nick_name") or "Unknown"
+            alliance_tag = c.get("alliance_tag") or "?"
+            display_name = f"[{alliance_tag}]{player_name}"
             msg = (
                 f"**{title}**\n"
-                f"Player: `{c['nick_name']}`\n"
-                f"Governor ID: `{c['governor_id']}`\n"
-                f"Alliance: `{c['alliance_tag']}`\n"
+                f"Player: `{display_name}`\n"
                 f"Town Center: **{old_display} → {new_display}**"
             )
             try:
@@ -1817,9 +1838,10 @@ async def kvkopponent(
             our_top100 = our_players_data["boards"][0].get("rows", [])[:100]
         our_top20 = our_top100[:20]
 
-        # Top-100 Truegold distribution. This follows the same compact
-        # chip-style idea as the requested example, but uses a code block so
-        # Discord keeps the two kingdom columns aligned.
+        # Top-100 Truegold distribution. The hero_total leaderboard does not
+        # include town_center_level, so obtain that field separately for the
+        # exact same top-100 Hero Power players. Kingdom 810 uses the local
+        # hourly database; the opponent requires lightweight base lookups.
         def tg_bucket(level):
             try:
                 level = int(level)
@@ -1827,19 +1849,58 @@ async def kvkopponent(
                 return None
             if level < 35:
                 return None
-            offset = level - 35
-            return (offset // 5) + 1
+            return ((level - 35) // 5) + 1
 
-        def tg_distribution(rows):
+        our_ids = [
+            str(row.get("governor_id"))
+            for row in our_top100
+            if row.get("governor_id") is not None
+        ]
+        our_db_players = await scanner.db.get_players_by_governor_ids(our_ids)
+
+        async def fetch_top100_base(rows):
+            result = {}
+            for batch_start in range(0, min(100, len(rows)), 20):
+                batch = rows[batch_start:batch_start + 20]
+
+                async def fetch_one(row):
+                    uid = row.get("uid")
+                    if not uid:
+                        return None, {}
+                    try:
+                        data = await scanner.api.get_player_base(str(uid), "uid")
+                        return str(uid), (data.get("player", {}) if data else {})
+                    except Exception as exc:
+                        print(f"Top-100 base lookup failed for UID {uid}: {exc}", flush=True)
+                        return str(uid), {}
+
+                fetched = await asyncio.gather(*(fetch_one(row) for row in batch))
+                for uid, player_data in fetched:
+                    if uid:
+                        result[uid] = player_data
+            return result
+
+        opponent_base = await fetch_top100_base(opponent_top100)
+
+        def tg_distribution(rows, db_players=None, base_players=None):
             counts = {}
             for row in rows[:100]:
-                tg = tg_bucket(row.get("town_center_level"))
+                level = None
+                gov_id = row.get("governor_id")
+                uid = row.get("uid")
+                if db_players is not None and gov_id is not None:
+                    saved = db_players.get(str(gov_id))
+                    if saved:
+                        level = saved["town_center_level"]
+                if level is None and base_players is not None and uid is not None:
+                    level = (base_players.get(str(uid)) or {}).get("town_center_level")
+                tg = tg_bucket(level)
                 if tg is not None:
                     counts[tg] = counts.get(tg, 0) + 1
             return counts
 
-        our_tg = tg_distribution(our_top100)
-        opp_tg = tg_distribution(opponent_top100)
+        our_tg = tg_distribution(our_top100, db_players=our_db_players)
+        opp_tg = tg_distribution(opponent_top100, base_players=opponent_base)
 
         lines.append("\n**Top 100 Hero Power · Truegold distribution**")
         lines.append("```text")
@@ -1859,12 +1920,16 @@ async def kvkopponent(
         for idx in range(20):
             left = our_top20[idx] if idx < len(our_top20) else {}
             right = opponent_top20[idx] if idx < len(opponent_top20) else {}
-            left_name = (left.get("nick_name") or "-")[:16]
-            right_name = (right.get("nick_name") or "-")[:16]
-            left_score = compact_number(left.get("score")) if left else "-"
-            right_score = compact_number(right.get("score")) if right else "-"
+            left_name = (left.get("nick_name") or "-")[:14]
+            right_name = (right.get("nick_name") or "-")[:14]
+            left_score_val = left.get("score") if left else None
+            right_score_val = right.get("score") if right else None
+            left_score = compact_number(left_score_val) if left else "-"
+            right_score = compact_number(right_score_val) if right else "-"
+            left_mark = "✓" if left_score_val is not None and (right_score_val is None or left_score_val > right_score_val) else " "
+            right_mark = "✓" if right_score_val is not None and (left_score_val is None or right_score_val > left_score_val) else " "
             lines.append(
-                f"{idx + 1:>2}  {left_name:<16} {left_score:>7}   {right_name:<16} {right_score:>7}"
+                f"{idx + 1:>2}  {left_mark}{left_name:<14} {left_score:>7}   {right_mark}{right_name:<14} {right_score:>7}"
             )
         lines.append("```")
 
@@ -1895,9 +1960,59 @@ async def kvkopponent(
 
         def detail_value(player, key, default="-"):
             value = player.get(key)
-            if value is None:
-                return default
-            return value
+            return default if value is None else value
+
+        def detail_ranks(data):
+            return data.get("ranks", {}) if isinstance(data, dict) else {}
+
+        def hero_gear_summary(hero):
+            gear = hero.get("gear")
+            if not isinstance(gear, list):
+                return ""
+            parts = []
+            for item in gear:
+                if not isinstance(item, dict):
+                    continue
+                slot = item.get("slot") or item.get("name") or "Gear"
+                enh = item.get("enhancement_level")
+                ref = item.get("refine_level")
+                glv = item.get("gear_level")
+                parts.append(
+                    f"{slot}: +{enh if enh is not None else '-'} / "
+                    f"R{ref if ref is not None else '-'} / "
+                    f"Lv {glv if glv is not None else '-'}"
+                )
+            return " | ".join(parts)
+
+        def hero_block(data):
+            heroes = data.get("heroes") if isinstance(data, dict) else None
+            if not isinstance(heroes, list):
+                return ["Heroes: unavailable"]
+
+            out = []
+            for position, hero in enumerate(heroes[:5], 1):
+                if not isinstance(hero, dict):
+                    continue
+                name = hero.get("name") or "Unknown"
+                level = hero.get("level", "-")
+                star = hero.get("star_label") or hero.get("star") or "-"
+                quality = hero.get("quality") or "-"
+                power = compact_number(hero.get("power"))
+                pos = hero.get("position") or position
+                excl = hero.get("exclusive_gear_level")
+                skills = hero.get("skill_levels") or []
+                skill_text = ", ".join(
+                    f"{sk.get('level', '-') if isinstance(sk, dict) else '-'}"
+                    for sk in skills
+                ) or "-"
+                gear_text = hero_gear_summary(hero) or "-"
+
+                out.append(
+                    f"Hero {pos}: {name} · Lv {level} · {star} · {quality} · {power}"
+                )
+                out.append(f"         Skills: {skill_text} · Exclusive: {excl if excl is not None else '-'}")
+                out.append(f"         Gear: {gear_text}")
+            return out or ["Heroes: unavailable"]
 
         lines.append("\n**Top 5 Hero Power comparison · detailed**")
         for idx, (our_row, our_detail, opp_row, opp_detail) in enumerate(detail_rows, 1):
@@ -1905,24 +2020,39 @@ async def kvkopponent(
             opp_player = detail_player(opp_row, opp_detail)
             ours_alliance = ours_player.get("alliance") or {}
             opp_alliance = opp_player.get("alliance") or {}
+            ours_ranks = detail_ranks(our_detail)
+            opp_ranks = detail_ranks(opp_detail)
 
+            ours_name = ours_player.get("nick_name") or our_row.get("nick_name") or "-"
+            opp_name = opp_player.get("nick_name") or opp_row.get("nick_name") or "-"
+            ours_tag = ours_alliance.get("abbr") or our_row.get("alliance_abbr") or "-"
+            opp_tag = opp_alliance.get("abbr") or opp_row.get("alliance_abbr") or "-"
+
+            ours_mystic = ours_ranks.get("mystic_trial", "-")
+            opp_mystic = opp_ranks.get("mystic_trial", "-")
+            ours_mystic_rank = ours_ranks.get("mystic_rank", "-")
+            opp_mystic_rank = opp_ranks.get("mystic_rank", "-")
+
+            lines.append("```text")
+            lines.append(f"#{idx}")
+            lines.append(f"810 [{ours_tag}]{ours_name}")
             lines.append(
-                f"\n**#{idx}**\n"
-                f"810: `{ours_player.get('nick_name') or our_row.get('nick_name') or '-'}` · "
-                f"Hero {compact_number(our_row.get('score'))}\n"
-                f"ID `{ours_player.get('governor_id') or our_row.get('governor_id') or '-'}` · "
+                f"    Hero {compact_number(our_row.get('score'))} · "
                 f"TC {detail_value(ours_player, 'town_center_level')} · "
-                f"Power {compact_number(ours_player.get('power'))}\n"
-                f"Kills {compact_number(ours_player.get('kills'))} · "
-                f"Alliance `{ours_alliance.get('abbr') or our_row.get('alliance_abbr') or '-'}`\n"
-                f"{kingdom}: `{opp_player.get('nick_name') or opp_row.get('nick_name') or '-'}` · "
-                f"Hero {compact_number(opp_row.get('score'))}\n"
-                f"ID `{opp_player.get('governor_id') or opp_row.get('governor_id') or '-'}` · "
-                f"TC {detail_value(opp_player, 'town_center_level')} · "
-                f"Power {compact_number(opp_player.get('power'))}\n"
-                f"Kills {compact_number(opp_player.get('kills'))} · "
-                f"Alliance `{opp_alliance.get('abbr') or opp_row.get('alliance_abbr') or '-'}`"
+                f"Power {compact_number(ours_player.get('power'))}"
             )
+            lines.append(f"    Mystic Trial {compact_number(ours_mystic)} · Rank {ours_mystic_rank}")
+            lines.extend(f"    {line}" for line in hero_block(our_detail))
+            lines.append("")
+            lines.append(f"{kingdom} [{opp_tag}]{opp_name}")
+            lines.append(
+                f"    Hero {compact_number(opp_row.get('score'))} · "
+                f"TC {detail_value(opp_player, 'town_center_level')} · "
+                f"Power {compact_number(opp_player.get('power'))}"
+            )
+            lines.append(f"    Mystic Trial {compact_number(opp_mystic)} · Rank {opp_mystic_rank}")
+            lines.extend(f"    {line}" for line in hero_block(opp_detail))
+            lines.append("```")
 
     # Send deliberate public sections instead of arbitrarily cutting a long response.
     # This keeps each section readable and prevents Discord from splitting a code block.
@@ -1962,24 +2092,15 @@ async def kvkopponent(
             # The detailed section is kept in complete player blocks. If it is too long,
             # split only between players and keep each resulting message a valid code box.
             detail_body = detail.replace(detail_marker, "", 1).strip()
-            detail_lines = detail_body.splitlines()
-            blocks = []
-            cur = []
-            for line in detail_lines:
-                if line.startswith("**#") and cur:
-                    blocks.append("\n".join(cur).strip())
-                    cur = []
-                cur.append(line)
-            if cur:
-                blocks.append("\n".join(cur).strip())
+            detail_parts = [part.strip() for part in detail_body.split("```text") if part.strip()]
 
             pending = []
-            for block in blocks:
-                candidate = "\n".join(pending + [block]).strip()
+            for block in detail_parts:
+                candidate = "\n\n".join(pending + [block]).strip()
                 wrapped = f"{detail_marker}\n```text\n{candidate}\n```"
                 if pending and len(wrapped) > 1900:
                     await interaction.followup.send(
-                        f"{detail_marker}\n```text\n{'\n'.join(pending)}\n```",
+                        f"{detail_marker}\n```text\n{'\n\n'.join(pending)}\n```",
                         ephemeral=False,
                     )
                     pending = [block]
@@ -1987,7 +2108,7 @@ async def kvkopponent(
                     pending.append(block)
             if pending:
                 await interaction.followup.send(
-                    f"{detail_marker}\n```text\n{'\n'.join(pending)}\n```",
+                    f"{detail_marker}\n```text\n{'\n\n'.join(pending)}\n```",
                     ephemeral=False,
                 )
 

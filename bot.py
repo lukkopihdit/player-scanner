@@ -28,6 +28,7 @@ WEEKLY_REPORT_CHANNEL_ID = int(os.getenv("WEEKLY_REPORT_CHANNEL_ID", str(REPORT_
 DB_PATH = os.getenv("DB_PATH", "/data/scanner.db")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 NOTIFY_CHANNEL_ID = int(os.getenv("NOTIFY_CHANNEL_ID", "0") or 0)
+KVK_OPPONENT_CHANNEL_ID = int(os.getenv("KVK_OPPONENT_CHANNEL_ID", "0") or 0)
 GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
 api_keys = [x.strip() for x in os.getenv("MIGHTPULSE_API_KEYS", "").split(",") if x.strip()]
 
@@ -1727,13 +1728,43 @@ async def weeklyreport(interaction: discord.Interaction):
 @app_commands.describe(
     kingdom="Opponent kingdom number",
     compare="Also compare the opponent with Kingdom 810",
+    send_to_kvk_opponent="Send the full result to the configured #kvk-opponent channel",
 )
 async def kvkopponent(
     interaction: discord.Interaction,
     kingdom: app_commands.Range[int, 1, 99999],
     compare: bool = False,
+    send_to_kvk_opponent: bool = False,
 ):
-    await interaction.response.defer(ephemeral=False)
+    await interaction.response.defer(ephemeral=send_to_kvk_opponent)
+
+    target_channel = None
+    if send_to_kvk_opponent:
+        if not KVK_OPPONENT_CHANNEL_ID:
+            await interaction.followup.send(
+                "KVK_OPPONENT_CHANNEL_ID is not configured in Compose.",
+                ephemeral=True,
+            )
+            return
+        target_channel = bot.get_channel(KVK_OPPONENT_CHANNEL_ID)
+        if target_channel is None:
+            try:
+                target_channel = await bot.fetch_channel(KVK_OPPONENT_CHANNEL_ID)
+            except Exception as exc:
+                print(f"Could not fetch KVK opponent channel: {exc}", flush=True)
+                await interaction.followup.send(
+                    "I could not access the configured #kvk-opponent channel.",
+                    ephemeral=True,
+                )
+                return
+
+    async def send_section(content: str):
+        if not content:
+            return
+        if target_channel is not None:
+            await target_channel.send(content)
+        else:
+            await interaction.followup.send(content, ephemeral=False)
 
     # Top 5 alliances by alliance power and top 20 players by Hero Total.
     alliances_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=alliance_power&limit=5")
@@ -2065,29 +2096,29 @@ async def kvkopponent(
 
     first = text[:first_end].strip()
     if first:
-        await interaction.followup.send(first, ephemeral=False)
+        await send_section(first)
 
     if compare_marker in text:
         compare_start = text.find(compare_marker)
         rough_start = text.find(rough_marker, compare_start)
         comparison = text[compare_start:rough_start if rough_start >= 0 else len(text)].strip()
         if comparison:
-            await interaction.followup.send(comparison, ephemeral=False)
+            await send_section(comparison)
 
         rough = text[rough_start:].strip() if rough_start >= 0 else ""
         if rough:
-            await interaction.followup.send(rough, ephemeral=False)
+            await send_section(rough)
 
         if detail_blocks:
-            await interaction.followup.send(
-                "**Top 5 Hero Power comparison · detailed**",
-                ephemeral=False,
-            )
+            await send_section("**Top 5 Hero Power comparison · detailed**")
             for block in detail_blocks:
-                await interaction.followup.send(
-                    f"```text\n{block}\n```",
-                    ephemeral=False,
-                )
+                await send_section(f"```text\n{block}\n```")
+
+    if target_channel is not None:
+        await interaction.followup.send(
+            f"Sent the Kingdom {kingdom} KVK comparison to <#{KVK_OPPONENT_CHANNEL_ID}>.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="webhooktest", description="Send a test notification")

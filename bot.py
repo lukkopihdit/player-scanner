@@ -1776,12 +1776,14 @@ async def weeklyreport(interaction: discord.Interaction):
     kingdom="Opponent kingdom number",
     compare="Also compare the opponent with Kingdom 810",
     send_to_kvk_opponent="Send the full result to the configured #kvk-opponent channel",
+    detailed_players="Number of top players to show in the detailed comparison (1-50)",
 )
 async def kvkopponent(
     interaction: discord.Interaction,
     kingdom: app_commands.Range[int, 1, 99999],
     compare: bool = False,
     send_to_kvk_opponent: bool = False,
+    detailed_players: app_commands.Range[int, 1, 50] = 5,
 ):
     await interaction.response.defer(ephemeral=send_to_kvk_opponent)
 
@@ -2106,8 +2108,8 @@ async def kvkopponent(
             build_rank_index(kingdom),
         )
 
-        # Detailed top-5 comparison. Fetch full base/ranks data only for the
-        # 10 players involved, keeping this optional and bounded.
+        # Detailed comparison. Fetch full player data for the requested number
+        # of players from each kingdom, capped at 50 per side.
         async def fetch_detail(row):
             if not row:
                 return {}
@@ -2135,12 +2137,15 @@ async def kvkopponent(
                 )
             return {}
 
+        detailed_count = min(int(detailed_players), 50)
+        max_available = max(len(our_top100), len(opponent_top100))
+        detailed_count = min(detailed_count, max_available)
         pair_rows = [
             (
-                our_top20[idx] if idx < len(our_top20) else None,
-                opponent_top20[idx] if idx < len(opponent_top20) else None,
+                our_top100[idx] if idx < len(our_top100) else None,
+                opponent_top100[idx] if idx < len(opponent_top100) else None,
             )
-            for idx in range(5)
+            for idx in range(detailed_count)
         ]
         detail_results = await asyncio.gather(
             *(fetch_detail(row) if row else asyncio.sleep(0, result={})
@@ -2198,7 +2203,7 @@ async def kvkopponent(
                 hero_power = hero.get("power")
                 power = compact_number(hero_power) if hero_power is not None else "-"
                 widget = hero.get("exclusive_gear_level")
-                out.append(f"{position}. {name} · {power}")
+                out.append(f"{position}. {name}" + (f" · {power}" if power != "-" else ""))
                 out.append(f"   Widget: {widget if widget is not None else '-'}")
                 gear_parts = hero_gear_summary(hero)
                 if gear_parts:
@@ -2262,8 +2267,19 @@ async def kvkopponent(
             }
 
             def metric_line(label, ours_value, opp_value):
-                ours_mark = "✓" if ours_value is not None and (opp_value is None or ours_value > opp_value) else " "
-                opp_mark = "✓" if opp_value is not None and (ours_value is None or opp_value > ours_value) else " "
+                if ours_value is not None and opp_value is not None:
+                    if ours_value > opp_value:
+                        ours_mark, opp_mark = "✓", " "
+                    elif opp_value > ours_value:
+                        ours_mark, opp_mark = " ", "✓"
+                    else:
+                        ours_mark, opp_mark = "=", "="
+                elif ours_value is not None:
+                    ours_mark, opp_mark = "✓", " "
+                elif opp_value is not None:
+                    ours_mark, opp_mark = " ", "✓"
+                else:
+                    ours_mark, opp_mark = " ", " "
                 ours_text = compact_number(ours_value) if ours_value is not None else "-"
                 opp_text = compact_number(opp_value) if opp_value is not None else "-"
                 return f"    {label:<12} {ours_mark}{ours_text:>10}   {opp_mark}{opp_text:>10}"
@@ -2323,7 +2339,7 @@ async def kvkopponent(
             await send_section(rough)
 
         if detail_blocks:
-            await send_section("**Top 5 Hero Power comparison · detailed**")
+            await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
             for block in detail_blocks:
                 # Discord's normal message content limit is 2000 characters.
                 # Keep every code block safely below that limit, splitting only

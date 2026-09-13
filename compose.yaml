@@ -1,15 +1,40 @@
 services:
   player-scanner:
-    build: .
+    image: python:3.13-slim
     container_name: player-scanner
     restart: unless-stopped
+
     environment:
-      DISCORD_TOKEN: "PUT_DISCORD_BOT_TOKEN_HERE"
-      MIGHTPULSE_API_KEYS: "kss_KEY1,kss_KEY2,kss_KEY3"
-      NOTIFY_CHANNEL_ID: "123456789012345678"
+      DISCORD_TOKEN: "YOUR_DISCORD_BOT_TOKEN"
+      MIGHTPULSE_API_KEYS: "kss_YOUR_KEY_1,kss_YOUR_KEY_2,kss_YOUR_KEY_3,kss_YOUR_KEY_4"
+      NOTIFY_CHANNEL_ID: "YOUR_NOTIFICATION_CHANNEL_ID"
+      GUILD_ID: "YOUR_DISCORD_SERVER_ID"
+      DAILY_REPORT_CHANNEL_ID: "YOUR_DAILY_REPORT_CHANNEL_ID"
+      WEEKLY_REPORT_CHANNEL_ID: "YOUR_WEEKLY_REPORT_CHANNEL_ID"
+      REPORT_HOUR_UTC: "0"
+      RANK_ALERT_THRESHOLD: "5"
       DB_PATH: "/data/scanner.db"
+      PYTHONUNBUFFERED: "1"
+
     volumes:
       - scanner-data:/data
+
+    working_dir: /app
+
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "Downloading latest bot.py from GitHub..."
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends curl
+        rm -rf /var/lib/apt/lists/*
+        curl -fL "https://raw.githubusercontent.com/lukkopihdit/player-scanner/refs/heads/main/bot.py" -o /app/bot.py
+        curl -fL "https://raw.githubusercontent.com/lukkopihdit/player-scanner/refs/heads/main/requirements.txt" -o /app/requirements.txt
+        pip install --no-cache-dir -r /app/requirements.txt
+        echo "Starting bot..."
+        exec python -u /app/bot.py
 
 volumes:
   scanner-data:

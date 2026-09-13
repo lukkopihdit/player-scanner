@@ -392,6 +392,31 @@ class Database:
             )
             return await cur.fetchall()
 
+    async def fetch_changes_for_player(self, governor_id: str, limit: int = 50):
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM changes WHERE governor_id=? ORDER BY id DESC LIMIT ?",
+                (str(governor_id), limit),
+            )
+            return await cur.fetchall()
+
+    async def fetch_changes_filtered(self, change_type: str, since_hours: int, limit: int = 50):
+        return await self.fetch_changes(change_type, since_hours, limit)
+
+    async def get_inactive_players(self, days: int, limit: int = 50):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT * FROM players
+                   WHERE kid=? AND (last_active_at IS NULL OR last_active_at < ?)
+                   ORDER BY CASE WHEN last_active_at IS NULL THEN 0 ELSE last_active_at END ASC
+                   LIMIT ?""",
+                (KINGDOM_ID, cutoff, limit),
+            )
+            return await cur.fetchall()
+
     async def status(self):
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute("SELECT COUNT(*) FROM players")
@@ -424,6 +449,13 @@ class Scanner:
     async def start(self):
         self.session = aiohttp.ClientSession()
         self.api = ApiClient(self.session)
+
+    async def get_ranking(self, board: str, limit: int = 100) -> dict[str, Any] | None:
+        if not self.api:
+            raise RuntimeError("Scanner API client not started")
+        return await self.api.get(
+            f"/kingdoms/{KINGDOM_ID}/ranks?board={urllib.parse.quote(board, safe='')}&limit={limit}"
+        )
 
     async def close(self):
         if self.session:
@@ -649,6 +681,27 @@ scanner = Scanner(Database(DB_PATH))
 bot = ScannerBot(scanner)
 
 
+def level_label(level: int | None) -> str:
+    if level is None:
+        return "Unknown"
+    level = int(level)
+    if level <= 30:
+        return f"Lv. {level}"
+    if level <= 34:
+        return f"30-{level - 30}"
+    offset = level - 35
+    tg = offset // 5 + 1
+    sub = offset % 5
+    return f"TG {tg}" if sub == 0 else f"TG {tg}-{sub}"
+
+
+def _is_increase(old_value: Any, new_value: Any) -> bool:
+    try:
+        return int(new_value) > int(old_value)
+    except (TypeError, ValueError):
+        return False
+
+
 @bot.tree.command(name="status", description="Show scanner status for kingdom 810")
 async def status(interaction: discord.Interaction):
     players, alliances, changes, last_scan = await scanner.db.status()
@@ -840,6 +893,268 @@ async def deepscan(
         file=file,
         ephemeral=True,
     )
+
+
+
+@bot.tree.command(name="recent", description="Show the most recent player changes")
+@app_commands.describe(hours="Only changes from the last N hours", limit="Maximum number of changes")
+async def recent(
+    interaction: discord.Interaction,
+    hours: app_commands.Range[int, 1, 168] = 24,
+    limit: app_commands.Range[int, 1, 25] = 15,
+):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.fetch_changes("all", hours, limit)
+    if not rows:
+        await interaction.followup.send(f"No changes found in the last {hours} hours.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Kingdom 810 recent changes · {hours}h", color=discord.Color.orange())
+    lines = []
+    for row in rows:
+        ts = int(datetime.fromisoformat(row["created_at"]).timestamp())
+        lines.append(
+            f"**{row['nick_name'] or 'Unknown'}** · `{row['governor_id']}` · `{row['alliance_tag'] or '?'}`\n"
+            f"`{row['change_type']}`: `{row['old_value']}` → `{row['new_value']}` · <t:{ts}:R>"
+        )
+    embed.description = "\n\n".join(lines)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="levelups", description="Show Town Center level increases")
+@app_commands.describe(hours="Only changes from the last N hours", limit="Maximum number of results")
+async def levelups(
+    interaction: discord.Interaction,
+    hours: app_commands.Range[int, 1, 720] = 24,
+    limit: app_commands.Range[int, 1, 25] = 15,
+):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.fetch_changes("level", hours, limit)
+    rows = [r for r in rows if _is_increase(r["old_value"], r["new_value"])]
+    if not rows:
+        await interaction.followup.send(f"No Town Center increases found in the last {hours} hours.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Kingdom 810 Town Center increases · {hours}h", color=discord.Color.gold())
+    lines = []
+    for row in rows:
+        old, new = int(row["old_value"]), int(row["new_value"])
+        lines.append(f"**{row['nick_name'] or 'Unknown'}** · `{row['governor_id']}` · `{row['alliance_tag'] or '?'}`\n`{level_label(old)} → {level_label(new)}`")
+    embed.description = "\n\n".join(lines)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="namechanges", description="Show player name changes")
+@app_commands.describe(hours="Only changes from the last N hours", limit="Maximum number of results")
+async def namechanges(
+    interaction: discord.Interaction,
+    hours: app_commands.Range[int, 1, 720] = 24,
+    limit: app_commands.Range[int, 1, 25] = 15,
+):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.fetch_changes("name", hours, limit)
+    if not rows:
+        await interaction.followup.send(f"No name changes found in the last {hours} hours.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Kingdom 810 name changes · {hours}h", color=discord.Color.blurple())
+    embed.description = "\n\n".join(
+        f"**{r['governor_id']}** · `{r['alliance_tag'] or '?'}`\n`{r['old_value']}` → `{r['new_value']}`"
+        for r in rows
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="alliancechanges", description="Show players who changed alliance")
+@app_commands.describe(hours="Only changes from the last N hours", limit="Maximum number of results")
+async def alliancechanges(
+    interaction: discord.Interaction,
+    hours: app_commands.Range[int, 1, 720] = 24,
+    limit: app_commands.Range[int, 1, 25] = 15,
+):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.fetch_changes("alliance", hours, limit)
+    if not rows:
+        await interaction.followup.send(f"No alliance changes found in the last {hours} hours.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Kingdom 810 alliance changes · {hours}h", color=discord.Color.teal())
+    embed.description = "\n\n".join(
+        f"**{r['nick_name'] or 'Unknown'}** · `{r['governor_id']}`\n`{r['old_value']}` → `{r['new_value']}`"
+        for r in rows
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="history", description="Show the recorded change history for a player")
+@app_commands.describe(identifier="Governor ID or exact stored player name", limit="Maximum number of history entries")
+async def history(
+    interaction: discord.Interaction,
+    identifier: str,
+    limit: app_commands.Range[int, 1, 50] = 25,
+):
+    await interaction.response.defer(ephemeral=True)
+    identifier = identifier.strip()
+    row = await scanner.db.get_player(identifier) if identifier.isdigit() else await scanner.db.get_player_by_name(identifier)
+    if not row:
+        await interaction.followup.send("Player not found in the stored data.", ephemeral=True)
+        return
+    rows = await scanner.db.fetch_changes_for_player(str(row["governor_id"]), limit)
+    embed = discord.Embed(title=f"History · {row['nick_name'] or 'Unknown'}", color=discord.Color.dark_teal())
+    embed.add_field(name="Governor ID", value=str(row["governor_id"]), inline=True)
+    embed.add_field(name="Alliance", value=str(row["alliance_tag"] or "?"), inline=True)
+    if not rows:
+        embed.description = "No recorded changes for this player yet."
+    else:
+        embed.description = "\n\n".join(
+            f"`{r['change_type']}`: `{r['old_value']}` → `{r['new_value']}` · <t:{int(datetime.fromisoformat(r['created_at']).timestamp())}:R>"
+            for r in rows
+        )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="inactive", description="List players inactive for at least N days")
+@app_commands.describe(days="Minimum number of inactive days", limit="Maximum number of players")
+async def inactive(
+    interaction: discord.Interaction,
+    days: app_commands.Range[int, 1, 365] = 7,
+    limit: app_commands.Range[int, 1, 50] = 25,
+):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.get_inactive_players(days, limit)
+    if not rows:
+        await interaction.followup.send(f"No stored players are known to be inactive for {days}+ days.", ephemeral=True)
+        return
+    lines = []
+    for r in rows:
+        if r["last_active_at"]:
+            ts = int(float(r["last_active_at"]))
+            last = f"<t:{ts}:R>"
+        else:
+            last = "Never recorded"
+        lines.append(f"`{r['governor_id']}` · **{r['nick_name'] or 'Unknown'}** · `{r['alliance_tag'] or '?'}` · {last}")
+    embed = discord.Embed(title=f"Kingdom 810 inactive {days}+ days", description="\n".join(lines), color=discord.Color.red())
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="allianceinfo", description="Show detailed information for one tracked alliance")
+@app_commands.describe(tag="Exact case-sensitive alliance tag")
+async def allianceinfo(interaction: discord.Interaction, tag: str):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.get_alliances(100)
+    row = next((r for r in rows if r["abbr"] == tag.strip()), None)
+    if not row:
+        await interaction.followup.send("Alliance not found in the tracked top-100 data.", ephemeral=True)
+        return
+    members = await scanner.db.get_alliance_players(tag.strip(), 1000)
+    powers = [int(m["power"]) for m in members if m["power"] is not None]
+    levels = [int(m["town_center_level"]) for m in members if m["town_center_level"] is not None]
+    embed = discord.Embed(title=f"{row['abbr']} · {row['name']}", color=discord.Color.green())
+    embed.add_field(name="Power", value=f"{int(row['power'] or 0):,}", inline=True)
+    embed.add_field(name="Rank", value=f"#{row['power_rank']}", inline=True)
+    embed.add_field(name="Members", value=str(row['member_count'] or len(members)), inline=True)
+    embed.add_field(name="Leader", value=str(row['leader_name'] or "Unknown"), inline=True)
+    if powers:
+        embed.add_field(name="Average player power", value=f"{sum(powers)/len(powers):,.0f}", inline=True)
+    if levels:
+        embed.add_field(name="Highest Town Center", value=level_label(max(levels)), inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="alliancecompare", description="Compare two tracked alliances")
+@app_commands.describe(first="First exact case-sensitive alliance tag", second="Second exact case-sensitive alliance tag")
+async def alliancecompare(interaction: discord.Interaction, first: str, second: str):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.get_alliances(100)
+    a = next((r for r in rows if r["abbr"] == first.strip()), None)
+    b = next((r for r in rows if r["abbr"] == second.strip()), None)
+    if not a or not b:
+        await interaction.followup.send("Both alliances must be present in the tracked top-100 data.", ephemeral=True)
+        return
+    am = await scanner.db.get_alliance_players(a["abbr"], 1000)
+    bm = await scanner.db.get_alliance_players(b["abbr"], 1000)
+    def avg(ms):
+        vals = [int(x["power"]) for x in ms if x["power"] is not None]
+        return sum(vals)/len(vals) if vals else 0
+    def count_at(ms, min_level):
+        return sum(1 for x in ms if x["town_center_level"] is not None and int(x["town_center_level"]) >= min_level)
+    embed = discord.Embed(title=f"{a['abbr']} vs {b['abbr']}", color=discord.Color.blurple())
+    embed.add_field(name="Alliance power", value=f"{int(a['power'] or 0):,} vs {int(b['power'] or 0):,}", inline=False)
+    embed.add_field(name="Members", value=f"{len(am)} vs {len(bm)}", inline=True)
+    embed.add_field(name="Average player power", value=f"{avg(am):,.0f} vs {avg(bm):,.0f}", inline=True)
+    embed.add_field(name="TC 55+ (TG 5+)", value=f"{count_at(am,55)} vs {count_at(bm,55)}", inline=True)
+    embed.add_field(name="TC 60+ (TG 6+)", value=f"{count_at(am,60)} vs {count_at(bm,60)}", inline=True)
+    embed.add_field(name="TC 70+ (TG 8+)", value=f"{count_at(am,70)} vs {count_at(bm,70)}", inline=True)
+    embed.add_field(name="TC 80 (TG 10)", value=f"{count_at(am,80)} vs {count_at(bm,80)}", inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+TOP_BOARD_CHOICES = [
+    app_commands.Choice(name="Personal Power", value="personal_power"),
+    app_commands.Choice(name="Kills", value="kills"),
+    app_commands.Choice(name="Town Center", value="town_center"),
+    app_commands.Choice(name="Hero Power", value="single_hero"),
+    app_commands.Choice(name="Hero Total", value="hero_total"),
+    app_commands.Choice(name="Troop Power", value="troop_power"),
+    app_commands.Choice(name="Building Power", value="building_power"),
+    app_commands.Choice(name="Research", value="research_power"),
+    app_commands.Choice(name="Governor Gear", value="gov_gear"),
+    app_commands.Choice(name="Governor Charm", value="gov_charm"),
+    app_commands.Choice(name="Pet Power", value="pet_power"),
+    app_commands.Choice(name="Master Power", value="master_power"),
+]
+
+
+@bot.tree.command(name="top", description="Show a Kingdom 810 leaderboard")
+@app_commands.describe(board="Leaderboard to display", limit="Number of ranked players")
+@app_commands.choices(board=TOP_BOARD_CHOICES)
+async def top(
+    interaction: discord.Interaction,
+    board: app_commands.Choice[str],
+    limit: app_commands.Range[int, 1, 100] = 20,
+):
+    await interaction.response.defer(ephemeral=True)
+    data = await scanner.get_ranking(board.value, limit)
+    if not data:
+        await interaction.followup.send("The leaderboard could not be retrieved.", ephemeral=True)
+        return
+    boards = data.get("boards", [])
+    rows = boards[0].get("rows", []) if boards else []
+    if not rows:
+        await interaction.followup.send("No leaderboard entries were returned.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Kingdom 810 · {board.name} · Top {len(rows)}", color=discord.Color.gold())
+    lines = []
+    for r in rows:
+        name = r.get("nick_name") or r.get("name") or "Unknown"
+        score = r.get("score", "")
+        alliance = r.get("alliance_abbr") or r.get("abbr") or ""
+        ident = r.get("governor_id") or r.get("aid") or ""
+        lines.append(f"**#{r.get('rank', '?')}** {name} · `{ident}` · `{alliance}` · **{int(score):,}**")
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3890] + "…"
+    embed.description = text
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="truegold", description="Show recent Truegold progression")
+@app_commands.describe(hours="Only changes from the last N hours", limit="Maximum number of results")
+async def truegold(
+    interaction: discord.Interaction,
+    hours: app_commands.Range[int, 1, 720] = 24,
+    limit: app_commands.Range[int, 1, 25] = 15,
+):
+    await interaction.response.defer(ephemeral=True)
+    rows = await scanner.db.fetch_changes("level", hours, limit * 3)
+    rows = [r for r in rows if _is_increase(r["old_value"], r["new_value"]) and int(r["new_value"]) >= 31]
+    rows = rows[:limit]
+    if not rows:
+        await interaction.followup.send(f"No Truegold progression detected in the last {hours} hours.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Kingdom 810 Truegold progression · {hours}h", color=discord.Color.gold())
+    embed.description = "\n\n".join(
+        f"**{r['nick_name'] or 'Unknown'}** · `{r['governor_id']}` · `{r['alliance_tag'] or '?'}`\n"
+        f"`{level_label(int(r['old_value']))} → {level_label(int(r['new_value']))}` · <t:{int(datetime.fromisoformat(r['created_at']).timestamp())}:R>"
+        for r in rows
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="alliances", description="List the tracked alliance tags in Kingdom 810")

@@ -1702,7 +1702,7 @@ async def weeklyreport(interaction: discord.Interaction):
 
 
 
-@bot.tree.command(name="kvkopponent", description="Show opponent links, top 5 alliances, top 25 hero-power players, and an optional kingdom comparison")
+@bot.tree.command(name="kvkopponent", description="Show opponent links, top 5 alliances, top 20 hero-power players, and an optional kingdom comparison")
 @app_commands.describe(
     kingdom="Opponent kingdom number",
     compare="Also compare the opponent with Kingdom 810",
@@ -1712,11 +1712,11 @@ async def kvkopponent(
     kingdom: app_commands.Range[int, 1, 99999],
     compare: bool = False,
 ):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
 
-    # Top 5 alliances by alliance power and top 25 players by Hero Total.
+    # Top 5 alliances by alliance power and top 20 players by Hero Total.
     alliances_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=alliance_power&limit=5")
-    opponent_players_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=hero_total&limit=25")
+    opponent_players_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=hero_total&limit=100")
 
     opponent_kingdom_data = None
     our_kingdom_data = None
@@ -1724,7 +1724,7 @@ async def kvkopponent(
     if compare:
         opponent_kingdom_data = await scanner.api.get(f"/kingdoms/{kingdom}")
         our_kingdom_data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}")
-        our_players_data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}/ranks?board=hero_total&limit=25")
+        our_players_data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}/ranks?board=hero_total&limit=100")
 
     if not alliances_data and not opponent_players_data and not opponent_kingdom_data:
         await interaction.followup.send(
@@ -1737,9 +1737,10 @@ async def kvkopponent(
     if alliances_data and alliances_data.get("boards"):
         alliance_rows = alliances_data["boards"][0].get("rows", [])[:5]
 
-    opponent_top25 = []
+    opponent_top100 = []
     if opponent_players_data and opponent_players_data.get("boards"):
-        opponent_top25 = opponent_players_data["boards"][0].get("rows", [])[:25]
+        opponent_top100 = opponent_players_data["boards"][0].get("rows", [])[:100]
+    opponent_top20 = opponent_top100[:20]
 
     lines = [f"**Kingdom {kingdom}**", f"<https://mightpulse.com/kingdom/{kingdom}>"]
 
@@ -1755,9 +1756,9 @@ async def kvkopponent(
     else:
         lines.append("No alliance leaderboard data returned.")
 
-    lines.append("\n**Top 25 players · Hero Power**")
-    if opponent_top25:
-        for row in opponent_top25:
+    lines.append("\n**Top 20 players · Hero Power**")
+    if opponent_top20:
+        for row in opponent_top20:
             uid = row.get("uid")
             name = row.get("nick_name") or "Unknown"
             score = compact_number(row.get("score"))
@@ -1774,34 +1775,90 @@ async def kvkopponent(
         opp = kingdom_obj(opponent_kingdom_data)
 
         # Kingdom-level comparison intentionally excludes troop power.
+        # For these comparisons, use only the top 100 player-ranked contribution
+        # for each kingdom rather than the kingdom-wide totals. Troop Power is excluded.
+        async def top100_sum(board: str, kingdom_id: int):
+            data = await scanner.api.get(f"/kingdoms/{kingdom_id}/ranks?board={board}&limit=100")
+            rows = data.get("boards", [{}])[0].get("rows", []) if data else []
+            return sum((row.get("score") or 0) for row in rows[:100])
+
+        top100_metrics = {}
+        for board, label in [
+            ("hero_total", "Hero Power"),
+            ("research_power", "Research Power"),
+            ("gov_gear", "Governor Gear"),
+            ("gov_charm", "Governor Charm"),
+            ("pet_power", "Pet Power"),
+        ]:
+            our_value, opp_value = await asyncio.gather(
+                top100_sum(board, KINGDOM_ID),
+                top100_sum(board, kingdom),
+            )
+            top100_metrics[label] = (our_value, opp_value)
+
         lines.append("\n**Quick Kingdom Comparison · no troop power**")
         lines.append("```text")
-        lines.append(f"{'Metric':<22} {'810':>14} {'Opponent':>14}")
+        lines.append(f"{'Metric':<22} {'810':>14} {str(kingdom):>14}")
         lines.append(f"{'Power':<22} {compact_number(ours.get('power')):>14} {compact_number(opp.get('power')):>14}")
         lines.append(f"{'Average Power':<22} {compact_number(ours.get('avg_power')):>14} {compact_number(opp.get('avg_power')):>14}")
         lines.append(f"{'Players':<22} {ours.get('player_count', 0):>14,} {opp.get('player_count', 0):>14,}")
         lines.append(f"{'Active 7d':<22} {ours.get('active_7d', 0):>14,} {opp.get('active_7d', 0):>14,}")
         lines.append(f"{'Alliances':<22} {ours.get('alliance_count', 0):>14,} {opp.get('alliance_count', 0):>14,}")
         lines.append(f"{'Kills':<22} {compact_number(ours.get('kills')):>14} {compact_number(opp.get('kills')):>14}")
-        lines.append(f"{'Hero Power':<22} {compact_number(ours.get('hero_power')):>14} {compact_number(opp.get('hero_power')):>14}")
-        lines.append(f"{'Research Power':<22} {compact_number(ours.get('research_power')):>14} {compact_number(opp.get('research_power')):>14}")
-        lines.append(f"{'Governor Gear':<22} {compact_number(ours.get('governor_gear_power')):>14} {compact_number(opp.get('governor_gear_power')):>14}")
-        lines.append(f"{'Governor Charm':<22} {compact_number(ours.get('governor_charm_power')):>14} {compact_number(opp.get('governor_charm_power')):>14}")
-        lines.append(f"{'Pet Power':<22} {compact_number(ours.get('pet_power')):>14} {compact_number(opp.get('pet_power')):>14}")
+        for label in ["Hero Power", "Research Power", "Governor Gear", "Governor Charm", "Pet Power"]:
+            left, right = top100_metrics[label]
+            lines.append(f"{label:<22} {compact_number(left):>14} {compact_number(right):>14}")
         lines.append("```")
 
-        # Compare the top 25 Hero Total players roughly by rank. Troop power is
+        # Compare the top 20 Hero Total players roughly by rank. Troop power is
         # deliberately excluded from all player comparison output.
-        our_top25 = []
+        our_top100 = []
         if our_players_data and our_players_data.get("boards"):
-            our_top25 = our_players_data["boards"][0].get("rows", [])[:25]
+            our_top100 = our_players_data["boards"][0].get("rows", [])[:100]
+        our_top20 = our_top100[:20]
 
-        lines.append("\n**Top 25 Hero Power comparison · rough**")
+        # Top-100 Truegold distribution. This follows the same compact
+        # chip-style idea as the requested example, but uses a code block so
+        # Discord keeps the two kingdom columns aligned.
+        def tg_bucket(level):
+            try:
+                level = int(level)
+            except (TypeError, ValueError):
+                return None
+            if level < 35:
+                return None
+            offset = level - 35
+            return (offset // 5) + 1
+
+        def tg_distribution(rows):
+            counts = {}
+            for row in rows[:100]:
+                tg = tg_bucket(row.get("town_center_level"))
+                if tg is not None:
+                    counts[tg] = counts.get(tg, 0) + 1
+            return counts
+
+        our_tg = tg_distribution(our_top100)
+        opp_tg = tg_distribution(opponent_top100)
+
+        lines.append("\n**Top 100 Hero Power · Truegold distribution**")
+        lines.append("```text")
+        tg_keys = sorted(set(our_tg) | set(opp_tg), reverse=True)
+        if tg_keys:
+            left = "  ".join(f"TG {tg} × {our_tg.get(tg, 0)}" for tg in tg_keys)
+            right = "  ".join(f"TG {tg} × {opp_tg.get(tg, 0)}" for tg in tg_keys)
+            lines.append(f"810      {left}")
+            lines.append(f"{kingdom:<8} {right}")
+        else:
+            lines.append("No TG players found in the top 100 Hero Power rankings.")
+        lines.append("```")
+
+        lines.append("\n**Top 20 Hero Power comparison · rough**")
         lines.append("```text")
         lines.append(f"{'#':>2}  {'Kingdom 810':<24} {'Opponent':<24}")
-        for idx in range(25):
-            left = our_top25[idx] if idx < len(our_top25) else {}
-            right = opponent_top25[idx] if idx < len(opponent_top25) else {}
+        for idx in range(20):
+            left = our_top20[idx] if idx < len(our_top20) else {}
+            right = opponent_top20[idx] if idx < len(opponent_top20) else {}
             left_name = (left.get("nick_name") or "-")[:16]
             right_name = (right.get("nick_name") or "-")[:16]
             left_score = compact_number(left.get("score")) if left else "-"
@@ -1825,8 +1882,8 @@ async def kvkopponent(
 
         detail_rows = []
         for idx in range(5):
-            our_row = our_top25[idx] if idx < len(our_top25) else None
-            opp_row = opponent_top25[idx] if idx < len(opponent_top25) else None
+            our_row = our_top20[idx] if idx < len(our_top20) else None
+            opp_row = opponent_top20[idx] if idx < len(opponent_top20) else None
             our_detail, opp_detail = await asyncio.gather(
                 fetch_detail(our_row) if our_row else asyncio.sleep(0, result={}),
                 fetch_detail(opp_row) if opp_row else asyncio.sleep(0, result={}),
@@ -1867,25 +1924,72 @@ async def kvkopponent(
                 f"Alliance `{opp_alliance.get('abbr') or opp_row.get('alliance_abbr') or '-'}`"
             )
 
-    output = "\n".join(lines)
+    # Send deliberate public sections instead of arbitrarily cutting a long response.
+    # This keeps each section readable and prevents Discord from splitting a code block.
+    text = "\n".join(lines)
 
-    # Discord messages are limited. Split long comparisons safely.
-    chunks = []
-    remaining = output
-    while len(remaining) > 1900:
-        cut = remaining.rfind("\n", 0, 1900)
-        if cut <= 0:
-            cut = 1900
-        chunks.append(remaining[:cut])
-        remaining = remaining[cut + 1:]
-    if remaining:
-        chunks.append(remaining)
+    compare_marker = "**Quick Kingdom Comparison · no troop power**"
+    rough_marker = "**Top 20 Hero Power comparison · rough**"
+    detail_marker = "**Top 5 Hero Power comparison · detailed**"
 
-    for i, chunk in enumerate(chunks):
-        await interaction.followup.send(
-            content=chunk,
-            ephemeral=True,
-        )
+    first_end = text.find(compare_marker)
+    if first_end < 0:
+        first_end = len(text)
+
+    first = text[:first_end].strip()
+    await interaction.followup.send(first, ephemeral=False)
+
+    if compare_marker in text:
+        compare_start = text.find(compare_marker)
+        rough_start = text.find(rough_marker, compare_start)
+        detail_start = text.find(detail_marker, rough_start if rough_start >= 0 else compare_start)
+
+        comparison = text[compare_start:rough_start if rough_start >= 0 else len(text)].strip()
+        if rough_start >= 0:
+            rough = text[rough_start:detail_start if detail_start >= 0 else len(text)].strip()
+        else:
+            rough = ""
+        if detail_start >= 0:
+            detail = text[detail_start:].strip()
+        else:
+            detail = ""
+
+        if comparison:
+            await interaction.followup.send(comparison, ephemeral=False)
+        if rough:
+            await interaction.followup.send(rough, ephemeral=False)
+        if detail:
+            # The detailed section is kept in complete player blocks. If it is too long,
+            # split only between players and keep each resulting message a valid code box.
+            detail_body = detail.replace(detail_marker, "", 1).strip()
+            detail_lines = detail_body.splitlines()
+            blocks = []
+            cur = []
+            for line in detail_lines:
+                if line.startswith("**#") and cur:
+                    blocks.append("\n".join(cur).strip())
+                    cur = []
+                cur.append(line)
+            if cur:
+                blocks.append("\n".join(cur).strip())
+
+            pending = []
+            for block in blocks:
+                candidate = "\n".join(pending + [block]).strip()
+                wrapped = f"{detail_marker}\n```text\n{candidate}\n```"
+                if pending and len(wrapped) > 1900:
+                    await interaction.followup.send(
+                        f"{detail_marker}\n```text\n{'\n'.join(pending)}\n```",
+                        ephemeral=False,
+                    )
+                    pending = [block]
+                else:
+                    pending.append(block)
+            if pending:
+                await interaction.followup.send(
+                    f"{detail_marker}\n```text\n{'\n'.join(pending)}\n```",
+                    ephemeral=False,
+                )
 
 
 @bot.tree.command(name="webhooktest", description="Send a test notification")

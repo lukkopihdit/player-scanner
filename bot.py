@@ -1990,19 +1990,33 @@ async def kvkopponent(
             for i, (_, label) in enumerate(metric_specs)
         }
 
-        lines.append("\n**Quick Kingdom Comparison · no troop power**")
-        lines.append("```text")
-        lines.append(f"{'Metric':<22} {'810':>14} {str(kingdom):>14}")
-        lines.append(f"{'Power':<22} {compact_number(ours.get('power')):>14} {compact_number(opp.get('power')):>14}")
-        lines.append(f"{'Average Power':<22} {compact_number(ours.get('avg_power')):>14} {compact_number(opp.get('avg_power')):>14}")
-        lines.append(f"{'Players':<22} {ours.get('player_count', 0):>14,} {opp.get('player_count', 0):>14,}")
-        lines.append(f"{'Active 7d':<22} {ours.get('active_7d', 0):>14,} {opp.get('active_7d', 0):>14,}")
-        lines.append(f"{'Alliances':<22} {ours.get('alliance_count', 0):>14,} {opp.get('alliance_count', 0):>14,}")
-        lines.append(f"{'Kills':<22} {compact_number(ours.get('kills')):>14} {compact_number(opp.get('kills')):>14}")
-        for label in ["Hero Power", "Research Power", "Governor Gear", "Governor Charm", "Pet Power"]:
+        lines.append(f"\n**Quick Kingdom Comparison**")
+
+        def kingdom_value_line(label, left, right):
+            try:
+                left_num = float(left)
+                right_num = float(right)
+            except (TypeError, ValueError):
+                left_num = right_num = None
+
+            left_label = f"**{KINGDOM_ID}**" if left_num is not None and left_num > right_num else str(KINGDOM_ID)
+            right_label = f"**{kingdom}**" if right_num is not None and right_num > left_num else str(kingdom)
+            return f"{label} {left_label}: {compact_number(left)} - {right_label}: {compact_number(right)}"
+
+        lines.append(kingdom_value_line("Power", ours.get("power"), opp.get("power")))
+        lines.append(kingdom_value_line("Avg. Power", ours.get("avg_power"), opp.get("avg_power")))
+        lines.append(kingdom_value_line("Players", ours.get("player_count", 0), opp.get("player_count", 0)))
+        lines.append(kingdom_value_line("Active 7d", ours.get("active_7d", 0), opp.get("active_7d", 0)))
+        lines.append(kingdom_value_line("Alliances", ours.get("alliance_count", 0), opp.get("alliance_count", 0)))
+        for label, display in [
+            ("Hero Power", "Hero Power"),
+            ("Research Power", "Tech Power"),
+            ("Governor Gear", "Gov. Gear"),
+            ("Governor Charm", "Gov. Charm"),
+            ("Pet Power", "Pet Power"),
+        ]:
             left, right = top100_metrics[label]
-            lines.append(f"{label:<22} {compact_number(left):>14} {compact_number(right):>14}")
-        lines.append("```")
+            lines.append(kingdom_value_line(display, left, right))
 
         # Compare the top 20 Hero Total players roughly by rank. Troop power is
         # deliberately excluded from all player comparison output.
@@ -2298,22 +2312,20 @@ async def kvkopponent(
                     parts.append(f"{slot} +{enh}/R{ref}")
             return parts
 
-        def hero_block(data):
+        def hero_block(data, kingdom_label):
             heroes = data.get("heroes") if isinstance(data, dict) else None
             if not isinstance(heroes, list):
                 return ["Arena: unavailable"]
 
-            out = ["Arena"]
+            out = [f"Heroes {kingdom_label}"]
             shown = 0
             for position, hero in enumerate(heroes[:5], 1):
                 if not isinstance(hero, dict):
                     continue
                 shown += 1
                 name = hero.get("name") or "Unknown"
-                hero_power = hero.get("power")
-                power = compact_number(hero_power) if hero_power is not None else "-"
                 widget = hero.get("exclusive_gear_level")
-                out.append(f"{position}. {name}" + (f" · {power}" if power != "-" else ""))
+                out.append(f"{position}. {name}")
                 out.append(f"   Widget: {widget if widget is not None else '-'}")
                 gear_parts = hero_gear_summary(hero)
                 if gear_parts:
@@ -2376,326 +2388,70 @@ async def kvkopponent(
                 "Pet Power": leaderboard_component_value(opp_row, opp_player, opp_component_index, "Pet Power"),
             }
 
-            def metric_line(label, ours_value, opp_value):
-                # Do not use fixed-width columns here. Discord mobile wraps
-                # whitespace aggressively, which makes aligned tables unreadable.
-                ours_text = compact_number(ours_value) if ours_value is not None else "-"
-                opp_text = compact_number(opp_value) if opp_value is not None else "-"
-                if ours_value is not None and opp_value is not None:
-                    if ours_value > opp_value:
-                        return f"    {label}: 810 {ours_text} ▲ · {kingdom} {opp_text}"
-                    if opp_value > ours_value:
-                        return f"    {label}: 810 {ours_text} · {kingdom} {opp_text} ▲"
-                    return f"    {label}: 810 {ours_text} = {kingdom} {opp_text}"
-                if ours_value is not None:
-                    return f"    {label}: 810 {ours_text} ▲ · {kingdom} -"
-                if opp_value is not None:
-                    return f"    {label}: 810 - · {kingdom} {opp_text} ▲"
-                return f"    {label}: 810 - · {kingdom} -"
+            def metric_line(label, value, winner):
+                value_text = compact_number(value) if value is not None else "-"
+                if winner == "tie":
+                    suffix = " ="
+                elif winner:
+                    suffix = " ▲"
+                else:
+                    suffix = ""
+                return f"    {label}: {value_text}{suffix}"
+
+            def metric_suffix(left, right, is_left):
+                if left is None and right is None:
+                    return ""
+                if left is not None and right is not None:
+                    if left > right:
+                        return " ▲" if is_left else ""
+                    if right > left:
+                        return "" if is_left else " ▲"
+                    return " ="
+                return " ▲" if ((left is not None) == is_left) else ""
+
+            def player_metric_lines(values, other_values):
+                out = []
+                for label in ("Hero Power", "Research", "Gov. Gear", "Gov. Charm", "Pet Power"):
+                    value = values[label]
+                    other = other_values[label]
+                    value_text = compact_number(value) if value is not None else "-"
+                    out.append(f"    {label}: {value_text}{metric_suffix(value, other, True)}")
+                return out
+
+            def player_metric_lines_right(values, other_values):
+                out = []
+                for label in ("Hero Power", "Research", "Gov. Gear", "Gov. Charm", "Pet Power"):
+                    value = values[label]
+                    other = other_values[label]
+                    value_text = compact_number(value) if value is not None else "-"
+                    out.append(f"    {label}: {value_text}{metric_suffix(other, value, False)}")
+                return out
 
             block = [
                 f"#{idx}",
                 f"810 [{ours_tag}]{ours_name}",
                 f"    {level_label(detail_value(ours_player, 'town_center_level'))}",
                 f"    Mystic Trial: {ours_mystic} · Rank: {ours_mystic_rank}",
+                *player_metric_lines(ours_metric_values, opp_metric_values),
                 "",
                 f"{kingdom} [{opp_tag}]{opp_name}",
                 f"    {level_label(detail_value(opp_player, 'town_center_level'))}",
                 f"    Mystic Trial: {opp_mystic} · Rank: {opp_mystic_rank}",
+                *player_metric_lines_right(opp_metric_values, ours_metric_values),
                 "",
-                "    Power comparison",
-                metric_line("Hero Power", ours_metric_values["Hero Power"], opp_metric_values["Hero Power"]),
-                metric_line("Research", ours_metric_values["Research"], opp_metric_values["Research"]),
-                metric_line("Gov. Gear", ours_metric_values["Gov. Gear"], opp_metric_values["Gov. Gear"]),
-                metric_line("Gov. Charm", ours_metric_values["Gov. Charm"], opp_metric_values["Gov. Charm"]),
-                metric_line("Pet Power", ours_metric_values["Pet Power"], opp_metric_values["Pet Power"]),
+                *hero_block(our_detail, "810"),
                 "",
+                *hero_block(opp_detail, str(kingdom)),
             ]
-
-            # Keep the Arena details grouped under each kingdom after the compact
-            # player/power comparison so the important matchup numbers are easy
-            # to find.
-            block.extend(hero_block(our_detail))
-            block.append("")
-            block.extend(hero_block(opp_detail))
             detail_blocks.append("\n".join(block))
 
 
-    def _font(size: int, bold: bool = False):
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                return ImageFont.truetype(path, size)
-        return ImageFont.load_default()
-
-    def _draw_wrapped(draw, text, xy, font, fill=(20, 20, 20), max_width=1400, line_gap=6):
-        x, y = xy
-        words = str(text).split()
-        lines = []
-        current = ""
-        for word in words:
-            test = word if not current else current + " " + word
-            if draw.textbbox((0, 0), test, font=font)[2] <= max_width:
-                current = test
-            else:
-                if current:
-                    lines.append(current)
-                current = word
-        if current:
-            lines.append(current)
-        for line in lines:
-            draw.text((x, y), line, font=font, fill=fill)
-            y += draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] + line_gap
-        return y
-
-    def _metric_winner(a, b):
-        if a is None or b is None:
-            return ""
-        if a > b:
-            return "810"
-        if b > a:
-            return str(kingdom)
-        return "="
-
-    def _render_kvk_images(detail_rows, kingdom_id):
-        """Render mobile-readable, plain comparison images.
-
-        Two player matchups per image. Each card is sized to contain the full
-        five-hero Arena section; nothing is clipped at the bottom.
-        """
-        images = []
-        if not detail_rows:
-            return images
-
-        # Deliberately large fonts. Discord will scale the image to the phone's
-        # available width, so readability depends much more on font size than
-        # on trying to squeeze everything into one enormous image.
-        # Keep the source image close to Discord's mobile display width.
-        # A very wide source gets downscaled aggressively on phones, making
-        # otherwise reasonable fonts microscopic. 900px gives us readable text
-        # while still leaving two columns for the matchup.
-        title_font = _font(32, True)
-        subtitle_font = _font(23, True)
-        section_font = _font(24, True)
-        body_font = _font(24)
-        body_bold = _font(26, True)
-        small_font = _font(22)
-        gear_font = _font(20)
-
-        width = 900
-        chunk_size = 2
-        margin = 22
-        gap = 16
-        # The previous 690px card was too short for five Arena heroes, so the
-        # bottom of the fifth hero was being clipped. Keep two comparisons per
-        # image, but give each card enough vertical space for every field.
-        card_height = 900
-
-        def component_value(row, player, index, label):
-            for source in (row, player):
-                if not isinstance(source, dict):
-                    continue
-                for key in ("governor_id", "uid"):
-                    value = source.get(key)
-                    if value is not None:
-                        score = index.get(label, {}).get(str(value))
-                        if score is not None:
-                            return score
-            return None
-
-        def player_info(row, data):
-            player = data.get("player", {}) if isinstance(data, dict) else {}
-            ranks = data.get("ranks", {}) if isinstance(data, dict) else {}
-            alliance = player.get("alliance") or {}
-            name = player.get("nick_name") or row.get("nick_name") or "-"
-            tag = alliance.get("abbr") or row.get("alliance_abbr") or "-"
-            level = player.get("town_center_level")
-            mystic = ranks.get("mystic_trial")
-            mystic_rank = ranks.get("mystic_rank")
-            return player, name, tag, level, mystic, mystic_rank
-
-        def heroes(data):
-            hs = data.get("heroes") if isinstance(data, dict) else None
-            return hs[:5] if isinstance(hs, list) else []
-
-        def gear(hero):
-            vals = {}
-            for item in hero.get("gear") or []:
-                if not isinstance(item, dict):
-                    continue
-                slot = str(item.get("slot") or item.get("name") or "").lower()
-                enh = item.get("enhancement_level")
-                ref = item.get("refine_level")
-                if enh is None and ref is None:
-                    value = "-"
-                elif ref is None:
-                    value = f"+{enh}"
-                elif enh is None:
-                    value = f"R{ref}"
-                else:
-                    value = f"+{enh}/R{ref}"
-                for key in ("helmet", "gloves", "armor", "boots"):
-                    if key in slot:
-                        vals[key] = value
-            return vals
-
-        def draw_hero_column(draw, x, y, hero_list):
-            for pos in range(5):
-                hero = hero_list[pos] if pos < len(hero_list) else None
-                if hero:
-                    g = gear(hero)
-                    widget = hero.get("exclusive_gear_level")
-                    widget_text = f"Widget: {widget}" if widget is not None else "Widget: -"
-                    draw.text(
-                        (x, y),
-                        f"{pos + 1}. {hero.get('name', 'Unknown')} · {widget_text}",
-                        font=small_font,
-                        fill=(25, 25, 25),
-                    )
-                    draw.text(
-                        (x + 14, y + 30),
-                        f"Helmet {g.get('helmet', '-')} · Gloves {g.get('gloves', '-')}",
-                        font=gear_font,
-                        fill=(75, 75, 75),
-                    )
-                    draw.text(
-                        (x + 14, y + 59),
-                        f"Armor {g.get('armor', '-')} · Boots {g.get('boots', '-')}",
-                        font=gear_font,
-                        fill=(75, 75, 75),
-                    )
-                else:
-                    draw.text((x, y), f"{pos + 1}. -", font=small_font, fill=(100, 100, 100))
-                y += 84
-
-        for chunk_start in range(0, len(detail_rows), chunk_size):
-            chunk = detail_rows[chunk_start:chunk_start + chunk_size]
-            # Header + one complete card for each matchup. The card height is
-            # intentionally fixed and generous so every Arena hero and gear line
-            # remains inside the card instead of being cropped by the image.
-            height = 145 + len(chunk) * (card_height + gap) + 12
-            img = Image.new("RGB", (width, height), "white")
-            draw = ImageDraw.Draw(img)
-
-            y = 22
-            draw.text((margin, y), "KvK Opponent Comparison", font=title_font, fill=(15, 15, 15))
-            y += 43
-            draw.text(
-                (margin, y),
-                f"Kingdom 810 vs Kingdom {kingdom_id} · #{chunk_start + 1}–#{chunk_start + len(chunk)}",
-                font=subtitle_font,
-                fill=(45, 45, 45),
-            )
-            y += 38
-            draw.line((margin, y, width - margin, y), fill=(180, 180, 180), width=2)
-            y += 16
-
-            for row_offset, (orow, od, prow, pd) in enumerate(chunk):
-                card_top = y
-                card_bottom = card_top + card_height
-                draw.rectangle(
-                    (margin, card_top, width - margin, card_bottom),
-                    outline=(190, 190, 190),
-                    width=2,
-                )
-                draw.rectangle(
-                    (margin, card_top, width - margin, card_top + 45),
-                    fill=(235, 235, 235),
-                )
-                idx = chunk_start + row_offset + 1
-                draw.text((margin + 14, card_top + 8), f"#{idx}", font=section_font, fill=(15, 15, 15))
-
-                col_gap = 28
-                col_w = (width - 2 * margin - col_gap) // 2
-                left_x = margin + 18
-                right_x = left_x + col_w + col_gap
-                content_y = card_top + 61
-
-                op, oname, otag, olvl, omystic, orank = player_info(orow, od)
-                pp, pname, ptag, plvl, pmystic, prank = player_info(prow, pd)
-
-                draw.text((left_x, content_y), f"810 [{otag}]{oname}", font=body_bold, fill=(15, 15, 15))
-                draw.text((right_x, content_y), f"{kingdom_id} [{ptag}]{pname}", font=body_bold, fill=(15, 15, 15))
-                content_y += 29
-
-                draw.text((left_x, content_y), level_label(olvl), font=body_font, fill=(35, 35, 35))
-                draw.text((right_x, content_y), level_label(plvl), font=body_font, fill=(35, 35, 35))
-                content_y += 27
-
-                draw.text(
-                    (left_x, content_y),
-                    f"Mystic Trial: {omystic if omystic is not None else '-'} · Rank: {orank if orank is not None else '-'}",
-                    font=small_font,
-                    fill=(60, 60, 60),
-                )
-                draw.text(
-                    (right_x, content_y),
-                    f"Mystic Trial: {pmystic if pmystic is not None else '-'} · Rank: {prank if prank is not None else '-'}",
-                    font=small_font,
-                    fill=(60, 60, 60),
-                )
-                content_y += 31
-
-                draw.text((left_x, content_y), "Power Comparison", font=section_font, fill=(20, 20, 20))
-                draw.text((right_x, content_y), "Power Comparison", font=section_font, fill=(20, 20, 20))
-                content_y += 28
-
-                metrics = [
-                    ("Hero Power", orow.get("score"), prow.get("score")),
-                    ("Research", component_value(orow, op, our_component_index, "Research"), component_value(prow, pp, opp_component_index, "Research")),
-                    ("Gov. Gear", component_value(orow, op, our_component_index, "Gov. Gear"), component_value(prow, pp, opp_component_index, "Gov. Gear")),
-                    ("Gov. Charm", component_value(orow, op, our_component_index, "Gov. Charm"), component_value(prow, pp, opp_component_index, "Gov. Charm")),
-                    ("Pet Power", component_value(orow, op, our_component_index, "Pet Power"), component_value(prow, pp, opp_component_index, "Pet Power")),
-                ]
-
-                for label, a, b in metrics:
-                    winner = _metric_winner(a, b)
-                    at = compact_number(a) if a is not None else "-"
-                    bt = compact_number(b) if b is not None else "-"
-                    if winner == "=":
-                        left_mark, right_mark = "=", "="
-                    elif winner == "810":
-                        left_mark, right_mark = "▲", ""
-                    elif winner:
-                        left_mark, right_mark = "", "▲"
-                    else:
-                        left_mark, right_mark = "", ""
-                    draw.text((left_x, content_y), f"{label}: {at}", font=small_font, fill=(30, 30, 30))
-                    draw.text((right_x, content_y), f"{label}: {bt}", font=small_font, fill=(30, 30, 30))
-                    if left_mark:
-                        mark_x = left_x + draw.textbbox((0, 0), f"{label}: {at}", font=small_font)[2] + 7
-                        draw.text((mark_x, content_y - 1), left_mark, font=body_bold, fill=(15, 15, 15))
-                    if right_mark:
-                        mark_x = right_x + draw.textbbox((0, 0), f"{label}: {bt}", font=small_font)[2] + 7
-                        draw.text((mark_x, content_y - 1), right_mark, font=body_bold, fill=(15, 15, 15))
-                    content_y += 24
-
-                content_y += 6
-                draw.text((left_x, content_y), "Arena · 810", font=section_font, fill=(20, 20, 20))
-                draw.text((right_x, content_y), f"Arena · {kingdom_id}", font=section_font, fill=(20, 20, 20))
-                content_y += 27
-
-                draw_hero_column(draw, left_x, content_y, heroes(od))
-                draw_hero_column(draw, right_x, content_y, heroes(pd))
-
-                y = card_bottom + gap
-
-            img = img.crop((0, 0, width, y - gap + 18))
-            bio = io.BytesIO()
-            img.save(bio, format="PNG", optimize=True)
-            bio.seek(0)
-            images.append(bio)
-
-        return images
 
     # Send deliberate public sections. The initial links, kingdom comparison,
     # rough top-20 comparison, and each detailed top-5 block are separate
     # messages so Discord does not split a code block in the middle.
     text = "\n".join(lines)
-    compare_marker = "**Quick Kingdom Comparison · no troop power**"
+    compare_marker = "**Quick Kingdom Comparison**"
     rough_marker = "**Top 20 Hero Power comparison · rough**"
 
     first_end = text.find(compare_marker)

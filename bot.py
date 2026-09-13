@@ -2364,22 +2364,26 @@ async def kvkopponent(
         # Deliberately large fonts. Discord will scale the image to the phone's
         # available width, so readability depends much more on font size than
         # on trying to squeeze everything into one enormous image.
-        title_font = _font(44, True)
-        subtitle_font = _font(30, True)
-        section_font = _font(32, True)
-        body_font = _font(32)
-        body_bold = _font(34, True)
-        small_font = _font(29)
-        gear_font = _font(27)
+        # Keep the source image close to Discord's mobile display width.
+        # A very wide source gets downscaled aggressively on phones, making
+        # otherwise reasonable fonts microscopic. 900px gives us readable text
+        # while still leaving two columns for the matchup.
+        title_font = _font(30, True)
+        subtitle_font = _font(21, True)
+        section_font = _font(22, True)
+        body_font = _font(22)
+        body_bold = _font(24, True)
+        small_font = _font(20)
+        gear_font = _font(18)
 
-        width = 1400
+        width = 900
         chunk_size = 2
-        margin = 36
-        gap = 24
+        margin = 22
+        gap = 16
         # The previous 690px card was too short for five Arena heroes, so the
         # bottom of the fifth hero was being clipped. Keep two comparisons per
         # image, but give each card enough vertical space for every field.
-        card_height = 1100
+        card_height = 900
 
         def component_value(row, player, index, label):
             for source in (row, player):
@@ -2443,20 +2447,20 @@ async def kvkopponent(
                         fill=(25, 25, 25),
                     )
                     draw.text(
-                        (x + 18, y + 34),
-                        f"Helmet {g.get('helmet', '-')}   ·   Gloves {g.get('gloves', '-')}",
+                        (x + 14, y + 28),
+                        f"Helmet {g.get('helmet', '-')} · Gloves {g.get('gloves', '-')}",
                         font=gear_font,
                         fill=(75, 75, 75),
                     )
                     draw.text(
-                        (x + 18, y + 66),
-                        f"Armor {g.get('armor', '-')}   ·   Boots {g.get('boots', '-')}",
+                        (x + 14, y + 54),
+                        f"Armor {g.get('armor', '-')} · Boots {g.get('boots', '-')}",
                         font=gear_font,
                         fill=(75, 75, 75),
                     )
                 else:
                     draw.text((x, y), f"{pos + 1}. -", font=small_font, fill=(100, 100, 100))
-                y += 102
+                y += 82
 
         for chunk_start in range(0, len(detail_rows), chunk_size):
             chunk = detail_rows[chunk_start:chunk_start + chunk_size]
@@ -2506,11 +2510,11 @@ async def kvkopponent(
 
                 draw.text((left_x, content_y), f"810 [{otag}]{oname}", font=body_bold, fill=(15, 15, 15))
                 draw.text((right_x, content_y), f"{kingdom_id} [{ptag}]{pname}", font=body_bold, fill=(15, 15, 15))
-                content_y += 34
+                content_y += 29
 
                 draw.text((left_x, content_y), level_label(olvl), font=body_font, fill=(35, 35, 35))
                 draw.text((right_x, content_y), level_label(plvl), font=body_font, fill=(35, 35, 35))
-                content_y += 31
+                content_y += 27
 
                 draw.text(
                     (left_x, content_y),
@@ -2524,11 +2528,11 @@ async def kvkopponent(
                     font=small_font,
                     fill=(60, 60, 60),
                 )
-                content_y += 38
+                content_y += 31
 
                 draw.text((left_x, content_y), "Power Comparison", font=section_font, fill=(20, 20, 20))
                 draw.text((right_x, content_y), "Power Comparison", font=section_font, fill=(20, 20, 20))
-                content_y += 34
+                content_y += 28
 
                 metrics = [
                     ("Hero Power", orow.get("score"), prow.get("score")),
@@ -2550,14 +2554,20 @@ async def kvkopponent(
                         left_mark, right_mark = "", "▲"
                     else:
                         left_mark, right_mark = "", ""
-                    draw.text((left_x, content_y), f"{label}: {at} {left_mark}", font=small_font, fill=(30, 30, 30))
-                    draw.text((right_x, content_y), f"{label}: {bt} {right_mark}", font=small_font, fill=(30, 30, 30))
-                    content_y += 27
+                    draw.text((left_x, content_y), f"{label}: {at}", font=small_font, fill=(30, 30, 30))
+                    draw.text((right_x, content_y), f"{label}: {bt}", font=small_font, fill=(30, 30, 30))
+                    if left_mark:
+                        mark_x = left_x + draw.textbbox((0, 0), f"{label}: {at}", font=small_font)[2] + 7
+                        draw.text((mark_x, content_y - 1), left_mark, font=body_bold, fill=(15, 15, 15))
+                    if right_mark:
+                        mark_x = right_x + draw.textbbox((0, 0), f"{label}: {bt}", font=small_font)[2] + 7
+                        draw.text((mark_x, content_y - 1), right_mark, font=body_bold, fill=(15, 15, 15))
+                    content_y += 24
 
-                content_y += 8
+                content_y += 6
                 draw.text((left_x, content_y), "Arena · 810", font=section_font, fill=(20, 20, 20))
                 draw.text((right_x, content_y), f"Arena · {kingdom_id}", font=section_font, fill=(20, 20, 20))
-                content_y += 31
+                content_y += 27
 
                 draw_hero_column(draw, left_x, content_y, heroes(od))
                 draw_hero_column(draw, right_x, content_y, heroes(pd))

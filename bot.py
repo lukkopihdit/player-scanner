@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 BASE_URL = "https://api.mightpulse.com/v1"
+PUBLIC_BASE_URL = "https://mightpulse.com/api"
 KINGDOM_ID = 810
 SCAN_INTERVAL_SECONDS = 3600
 REQUEST_SPACING_SECONDS = 1.05
@@ -241,6 +242,31 @@ class ApiClient:
         if id_type:
             query += "&id_type=" + urllib.parse.quote(id_type, safe="")
         return await self.get(f"/players/{encoded}{query}")
+
+    async def get_public_kingdom(self, kingdom_id: int) -> dict[str, Any] | None:
+        """Fetch the public kingdom page data only for fields unavailable in the documented API."""
+        try:
+            async with self.session.get(
+                f"{PUBLIC_BASE_URL}/kingdoms/{kingdom_id}?players=100&alliances=100",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "PlayerScannerBot/1.0",
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status >= 400:
+                    body = await response.text()
+                    print(
+                        f"Public kingdom API HTTP {response.status}: {kingdom_id} -> {body[:500]}",
+                        flush=True,
+                    )
+                    return None
+                return await response.json()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Public kingdom API error for {kingdom_id}: {exc}", flush=True)
+            return None
 
 
 class Database:
@@ -1788,13 +1814,16 @@ async def kvkopponent(
             await interaction.followup.send(content, ephemeral=False)
 
     # Top 5 alliances by alliance power and top 20 players by Hero Total.
+    public_opponent = await scanner.api.get_public_kingdom(kingdom)
     alliances_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=alliance_power&limit=5")
     opponent_players_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=hero_total&limit=100")
 
     opponent_kingdom_data = None
     our_kingdom_data = None
+    our_public_kingdom = None
     our_players_data = None
     if compare:
+        our_public_kingdom = await scanner.api.get_public_kingdom(KINGDOM_ID)
         opponent_kingdom_data = await scanner.api.get(f"/kingdoms/{kingdom}")
         our_kingdom_data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}")
         our_players_data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}/ranks?board=hero_total&limit=100")
@@ -1842,10 +1871,14 @@ async def kvkopponent(
 
     if compare:
         def kingdom_obj(data):
-            return data.get("kingdom", {}) if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            if isinstance(data.get("kingdom"), dict):
+                return data["kingdom"]
+            return data
 
-        ours = kingdom_obj(our_kingdom_data)
-        opp = kingdom_obj(opponent_kingdom_data)
+        ours = kingdom_obj(our_public_kingdom or our_kingdom_data)
+        opp = kingdom_obj(public_opponent or opponent_kingdom_data)
 
         # Kingdom-level comparison intentionally excludes troop power.
         # For these comparisons, use only the top 100 player-ranked contribution
@@ -1896,10 +1929,54 @@ async def kvkopponent(
             our_top100 = our_players_data["boards"][0].get("rows", [])[:100]
         our_top20 = our_top100[:20]
 
-        # Top-100 Truegold distribution. The hero_total leaderboard does not
-        # include Town Center level. Instead of making 100 individual player
-        # requests, fetch the kingdom's Town Center leaderboard once and
-        # intersect it with the exact same top-100 Hero Power players.
+        # Kingdom-wide Truegold distribution from the same public endpoint used
+        # by the MightPulse kingdom page. The documented /v1 town_center board is
+        # capped at 100, so it cannot reproduce the full kingdom-wide counts.
+        def public_tg_distribution(public_data):
+            counts = {}
+            if not isinstance(public_data, dict):
+                return counts, None
+            pyramid = public_data.get("pyramid") or {}
+            tg_rows = pyramid.get("tg") if isinstance(pyramid, dict) else None
+            if not isinstance(tg_rows, list):
+                return counts, None
+            tc_total = None
+            for item in tg_rows:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "").strip().upper()
+                count = item.get("count")
+                if count is None:
+                    continue
+                if label == "TC":
+                    tc_total = int(count)
+                elif label.startswith("TG"):
+                    suffix = label[2:]
+                    try:
+                        counts[int(suffix)] = int(count)
+                    except ValueError:
+                        continue
+            return counts, tc_total
+
+        our_public_tg, our_public_tc = public_tg_distribution(our_public_kingdom)
+        opp_public_tg, opp_public_tc = public_tg_distribution(public_opponent)
+
+        lines.append("\n**Kingdom-wide Town Center distribution**")
+        lines.append("```text")
+        tg_labels = sorted(set(our_public_tg) | set(opp_public_tg), reverse=True)
+        if tg_labels:
+            left = "   ".join(f"TG {tg} × {our_public_tg.get(tg, 0)}" for tg in tg_labels)
+            right = "   ".join(f"TG {tg} × {opp_public_tg.get(tg, 0)}" for tg in tg_labels)
+            lines.append(f"810      {left}")
+            lines.append(f"{kingdom:<8} {right}")
+            if our_public_tc is not None or opp_public_tc is not None:
+                lines.append(f"TC       {our_public_tc if our_public_tc is not None else '-':>8}   {opp_public_tc if opp_public_tc is not None else '-':>8}")
+        else:
+            lines.append("No kingdom-wide TG distribution was returned by the MightPulse kingdom endpoint.")
+        lines.append("```")
+
+        # Top-100 Hero Power Truegold distribution. This remains a separate
+        # statistic because it describes only the strongest 100 Hero Power players.
         def tg_bucket(level):
             try:
                 level = int(level)
@@ -1922,44 +1999,56 @@ async def kvkopponent(
                         index[str(value)] = score
             return index
 
-        our_tc_index, opp_tc_index = await asyncio.gather(
-            get_top100_board_index("town_center", KINGDOM_ID),
-            get_top100_board_index("town_center", kingdom),
-        )
-
+        # Top-100 Hero Power Truegold distribution should use the documented API.
+        # Kingdom 810 can use the local scanner database; opponent players are
+        # resolved through the documented /players/{uid}?include=base endpoint.
+        # The public website endpoint is NOT used for this statistic.
         our_db_players = await scanner.db.get_players_by_governor_ids(
             [str(row.get("governor_id")) for row in our_top100 if row.get("governor_id") is not None]
         )
+        our_tg_top100 = {}
+        for row in our_top100:
+            saved = our_db_players.get(str(row.get("governor_id")))
+            if saved:
+                tg = tg_bucket(saved["town_center_level"])
+                if tg is not None:
+                    our_tg_top100[tg] = our_tg_top100.get(tg, 0) + 1
 
-        def tg_distribution(rows, db_players=None, tc_index=None):
+        async def opponent_top100_tg_distribution(rows):
             counts = {}
-            for row in rows[:100]:
-                level = None
-                gov_id = row.get("governor_id")
+
+            async def resolve(row):
                 uid = row.get("uid")
-                if db_players is not None and gov_id is not None:
-                    saved = db_players.get(str(gov_id))
-                    if saved:
-                        level = saved["town_center_level"]
-                if level is None and tc_index is not None:
-                    if gov_id is not None:
-                        level = tc_index.get(str(gov_id))
-                    if level is None and uid is not None:
-                        level = tc_index.get(str(uid))
+                gov_id = row.get("governor_id")
+                if uid is None and gov_id is None:
+                    return None
+
+                # Prefer UID because the hero_total board already exposes it.
+                if uid is not None:
+                    data = await scanner.api.get_player_base(str(uid), "uid")
+                else:
+                    data = await scanner.api.get_player_base(str(gov_id), "governor_id")
+
+                if not data:
+                    return None
+                player = data.get("player") or {}
+                return player.get("town_center_level")
+
+            levels = await asyncio.gather(*(resolve(row) for row in rows[:100]))
+            for level in levels:
                 tg = tg_bucket(level)
                 if tg is not None:
                     counts[tg] = counts.get(tg, 0) + 1
             return counts
 
-        our_tg = tg_distribution(our_top100, db_players=our_db_players, tc_index=our_tc_index)
-        opp_tg = tg_distribution(opponent_top100, tc_index=opp_tc_index)
+        opp_tg_top100 = await opponent_top100_tg_distribution(opponent_top100)
 
         lines.append("\n**Top 100 Hero Power · Truegold distribution**")
         lines.append("```text")
-        tg_keys = sorted(set(our_tg) | set(opp_tg), reverse=True)
+        tg_keys = sorted(set(our_tg_top100) | set(opp_tg_top100), reverse=True)
         if tg_keys:
-            left = "  ".join(f"TG {tg} × {our_tg.get(tg, 0)}" for tg in tg_keys)
-            right = "  ".join(f"TG {tg} × {opp_tg.get(tg, 0)}" for tg in tg_keys)
+            left = "   ".join(f"TG {tg} × {our_tg_top100.get(tg, 0)}" for tg in tg_keys)
+            right = "   ".join(f"TG {tg} × {opp_tg_top100.get(tg, 0)}" for tg in tg_keys)
             lines.append(f"810      {left}")
             lines.append(f"{kingdom:<8} {right}")
         else:

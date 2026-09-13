@@ -1496,9 +1496,9 @@ async def board_autocomplete(interaction: discord.Interaction, current: str):
 @bot.tree.command(name="top", description="Show a Kingdom 810 leaderboard. Start typing to select a board.")
 @app_commands.describe(board="Leaderboard", limit="Number of results")
 @app_commands.autocomplete(board=board_autocomplete)
-async def top(interaction: discord.Interaction, board: app_commands.Choice[str], limit: app_commands.Range[int, 1, 100] = 20):
+async def top(interaction: discord.Interaction, board: str, limit: app_commands.Range[int, 1, 100] = 20):
     await interaction.response.defer(ephemeral=True)
-    data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}/ranks?board={urllib.parse.quote(board.value, safe='')}&limit={limit}")
+    data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}/ranks?board={urllib.parse.quote(board, safe='')}&limit={limit}")
     if not data:
         await interaction.followup.send("Leaderboard request failed.", ephemeral=True)
         return

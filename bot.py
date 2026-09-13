@@ -1988,14 +1988,31 @@ async def kvkopponent(
         # Detailed top-5 comparison. Fetch full base/ranks data only for the
         # 10 players involved, keeping this optional and bounded.
         async def fetch_detail(row):
+            if not row:
+                return {}
             uid = row.get("uid")
-            if not uid:
-                return {}
+            governor_id = row.get("governor_id")
             try:
-                return await scanner.api.get_player_full(str(uid), "uid") or {}
+                # Prefer UID because the hero leaderboard supplies it, but fall
+                # back to governor_id if the UID lookup is unavailable.
+                if uid:
+                    data = await scanner.api.get_player_full(str(uid), "uid")
+                    if data and data.get("player"):
+                        return data
+                if governor_id:
+                    data = await scanner.api.get_player_full(str(governor_id), "governor_id")
+                    if data and data.get("player"):
+                        return data
+                print(
+                    f"Top-5 detail lookup returned no player for uid={uid}, governor_id={governor_id}",
+                    flush=True,
+                )
             except Exception as exc:
-                print(f"Top-5 detail lookup failed for UID {uid}: {exc}", flush=True)
-                return {}
+                print(
+                    f"Top-5 detail lookup failed for uid={uid}, governor_id={governor_id}: {exc}",
+                    flush=True,
+                )
+            return {}
 
         detail_rows = []
         for idx in range(5):
@@ -2133,7 +2150,27 @@ async def kvkopponent(
         if detail_blocks:
             await send_section("**Top 5 Hero Power comparison · detailed**")
             for block in detail_blocks:
-                await send_section(f"```text\n{block}\n```")
+                # Discord's normal message content limit is 2000 characters.
+                # Keep every code block safely below that limit, splitting only
+                # at whole lines so hero/gear information is never cut in half.
+                lines_block = block.split("\n")
+                chunks = []
+                current = []
+                current_len = len("```text\n") + len("\n```")
+                for line in lines_block:
+                    extra = len(line) + (1 if current else 0)
+                    if current and current_len + extra >= 1900:
+                        chunks.append("\n".join(current))
+                        current = []
+                        current_len = len("```text\n") + len("\n```")
+                    current.append(line)
+                    current_len += extra
+                if current:
+                    chunks.append("\n".join(current))
+
+                for chunk_index, chunk in enumerate(chunks, 1):
+                    suffix = f"\nPart {chunk_index}/{len(chunks)}" if len(chunks) > 1 else ""
+                    await send_section(f"```text\n{chunk}{suffix}\n```")
 
     if target_channel is not None:
         await interaction.followup.send(

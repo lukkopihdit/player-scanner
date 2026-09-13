@@ -2037,7 +2037,7 @@ async def kvkopponent(
         def hero_gear_summary(hero):
             gear = hero.get("gear")
             if not isinstance(gear, list):
-                return ""
+                return []
             parts = []
             for item in gear:
                 if not isinstance(item, dict):
@@ -2045,43 +2045,42 @@ async def kvkopponent(
                 slot = item.get("slot") or item.get("name") or "Gear"
                 enh = item.get("enhancement_level")
                 ref = item.get("refine_level")
-                glv = item.get("gear_level")
-                parts.append(
-                    f"{slot}: +{enh if enh is not None else '-'} / "
-                    f"R{ref if ref is not None else '-'} / "
-                    f"Lv {glv if glv is not None else '-'}"
-                )
-            return " | ".join(parts)
+                if enh is None and ref is None:
+                    parts.append(f"{slot}")
+                elif ref is None:
+                    parts.append(f"{slot} +{enh}")
+                elif enh is None:
+                    parts.append(f"{slot} R{ref}")
+                else:
+                    parts.append(f"{slot} +{enh}/R{ref}")
+            return parts
 
         def hero_block(data):
             heroes = data.get("heroes") if isinstance(data, dict) else None
             if not isinstance(heroes, list):
-                return ["Heroes: unavailable"]
+                return ["Arena: unavailable"]
 
-            out = []
+            out = ["Arena"]
+            shown = 0
             for position, hero in enumerate(heroes[:5], 1):
                 if not isinstance(hero, dict):
                     continue
+                shown += 1
                 name = hero.get("name") or "Unknown"
-                level = hero.get("level", "-")
-                star = hero.get("star_label") or hero.get("star") or "-"
-                quality = hero.get("quality") or "-"
                 power = compact_number(hero.get("power"))
-                pos = hero.get("position") or position
-                excl = hero.get("exclusive_gear_level")
-                skills = hero.get("skill_levels") or []
-                skill_text = ", ".join(
-                    f"{sk.get('level', '-') if isinstance(sk, dict) else '-'}"
-                    for sk in skills
-                ) or "-"
-                gear_text = hero_gear_summary(hero) or "-"
+                widget = hero.get("exclusive_gear_level")
+                out.append(f"{position}. {name} · {power}")
+                out.append(f"   Widget: {widget if widget is not None else '-'}")
+                gear_parts = hero_gear_summary(hero)
+                if gear_parts:
+                    for gear_line in gear_parts:
+                        out.append(f"   {gear_line}")
+                else:
+                    out.append("   Gear: unavailable")
 
-                out.append(
-                    f"Hero {pos}: {name} · Lv {level} · {star} · {quality} · {power}"
-                )
-                out.append(f"         Skills: {skill_text} · Exclusive: {excl if excl is not None else '-'}")
-                out.append(f"         Gear: {gear_text}")
-            return out or ["Heroes: unavailable"]
+            if shown == 0:
+                out.append("Unavailable")
+            return out
 
         # Build the detailed top-5 comparison as independent player blocks.
         # Each block is sent as its own public Discord message so Discord cannot

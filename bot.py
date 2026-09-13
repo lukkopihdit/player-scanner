@@ -2368,13 +2368,13 @@ async def kvkopponent(
         # A very wide source gets downscaled aggressively on phones, making
         # otherwise reasonable fonts microscopic. 900px gives us readable text
         # while still leaving two columns for the matchup.
-        title_font = _font(30, True)
-        subtitle_font = _font(21, True)
-        section_font = _font(22, True)
-        body_font = _font(22)
-        body_bold = _font(24, True)
-        small_font = _font(20)
-        gear_font = _font(18)
+        title_font = _font(32, True)
+        subtitle_font = _font(23, True)
+        section_font = _font(24, True)
+        body_font = _font(24)
+        body_bold = _font(26, True)
+        small_font = _font(22)
+        gear_font = _font(20)
 
         width = 900
         chunk_size = 2
@@ -2447,20 +2447,20 @@ async def kvkopponent(
                         fill=(25, 25, 25),
                     )
                     draw.text(
-                        (x + 14, y + 28),
+                        (x + 14, y + 30),
                         f"Helmet {g.get('helmet', '-')} · Gloves {g.get('gloves', '-')}",
                         font=gear_font,
                         fill=(75, 75, 75),
                     )
                     draw.text(
-                        (x + 14, y + 54),
+                        (x + 14, y + 59),
                         f"Armor {g.get('armor', '-')} · Boots {g.get('boots', '-')}",
                         font=gear_font,
                         fill=(75, 75, 75),
                     )
                 else:
                     draw.text((x, y), f"{pos + 1}. -", font=small_font, fill=(100, 100, 100))
-                y += 82
+                y += 84
 
         for chunk_start in range(0, len(detail_rows), chunk_size):
             chunk = detail_rows[chunk_start:chunk_start + chunk_size]

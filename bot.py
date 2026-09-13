@@ -2354,9 +2354,8 @@ async def kvkopponent(
     def _render_kvk_images(detail_rows, kingdom_id):
         """Render mobile-readable, plain comparison images.
 
-        Two player matchups per image.  The previous version packed five very
-        tall cards into a single 1500px-wide image, which Discord scaled down
-        aggressively on phones and made the text microscopic.
+        Two player matchups per image. Each card is sized to contain the full
+        five-hero Arena section; nothing is clipped at the bottom.
         """
         images = []
         if not detail_rows:
@@ -2377,7 +2376,10 @@ async def kvkopponent(
         chunk_size = 2
         margin = 30
         gap = 18
-        card_height = 690
+        # The previous 690px card was too short for five Arena heroes, so the
+        # bottom of the fifth hero was being clipped. Keep two comparisons per
+        # image, but give each card enough vertical space for every field.
+        card_height = 835
 
         def component_value(row, player, index, label):
             for source in (row, player):
@@ -2458,7 +2460,10 @@ async def kvkopponent(
 
         for chunk_start in range(0, len(detail_rows), chunk_size):
             chunk = detail_rows[chunk_start:chunk_start + chunk_size]
-            height = 145 + len(chunk) * (card_height + gap)
+            # Header + one complete card for each matchup. The card height is
+            # intentionally fixed and generous so every Arena hero and gear line
+            # remains inside the card instead of being cropped by the image.
+            height = 145 + len(chunk) * (card_height + gap) + 12
             img = Image.new("RGB", (width, height), "white")
             draw = ImageDraw.Draw(img)
 
@@ -2559,7 +2564,7 @@ async def kvkopponent(
 
                 y = card_bottom + gap
 
-            img = img.crop((0, 0, width, y - gap + 12))
+            img = img.crop((0, 0, width, y - gap + 18))
             bio = io.BytesIO()
             img.save(bio, format="PNG", optimize=True)
             bio.seek(0)

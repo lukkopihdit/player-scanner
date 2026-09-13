@@ -1794,12 +1794,13 @@ async def clearkvkchannel(interaction: discord.Interaction, yes: bool = False):
 
     # Enforce the permission server-side as well. Discord's default_permissions
     # only controls command visibility and is not a substitute for this check.
-    if not isinstance(interaction.user, discord.Member) or not (
-        interaction.user.guild_permissions.manage_messages
-        or interaction.user.guild_permissions.administrator
-    ):
+    # Interaction.permissions is the permissions Discord calculated for the
+    # command invocation. It is more reliable here than relying on the cached
+    # Member object, and correctly recognizes Administrator as sufficient.
+    perms = interaction.permissions
+    if not (perms.manage_messages or perms.administrator):
         await interaction.response.send_message(
-            "You need the Manage Messages permission to use this command.",
+            "You need the Manage Messages permission (or Administrator) to use this command.",
             ephemeral=True,
         )
         return

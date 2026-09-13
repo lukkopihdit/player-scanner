@@ -2364,13 +2364,13 @@ async def kvkopponent(
         # Deliberately large fonts. Discord will scale the image to the phone's
         # available width, so readability depends much more on font size than
         # on trying to squeeze everything into one enormous image.
-        title_font = _font(38, True)
-        subtitle_font = _font(27, True)
-        section_font = _font(27, True)
-        body_font = _font(27)
-        body_bold = _font(28, True)
-        small_font = _font(24)
-        gear_font = _font(22)
+        title_font = _font(44, True)
+        subtitle_font = _font(30, True)
+        section_font = _font(32, True)
+        body_font = _font(32)
+        body_bold = _font(34, True)
+        small_font = _font(29)
+        gear_font = _font(27)
 
         width = 1400
         chunk_size = 2
@@ -2379,7 +2379,7 @@ async def kvkopponent(
         # The previous 690px card was too short for five Arena heroes, so the
         # bottom of the fifth hero was being clipped. Keep two comparisons per
         # image, but give each card enough vertical space for every field.
-        card_height = 965
+        card_height = 1100
 
         def component_value(row, player, index, label):
             for source in (row, player):
@@ -2443,20 +2443,20 @@ async def kvkopponent(
                         fill=(25, 25, 25),
                     )
                     draw.text(
-                        (x + 18, y + 29),
+                        (x + 18, y + 34),
                         f"Helmet {g.get('helmet', '-')}   ·   Gloves {g.get('gloves', '-')}",
                         font=gear_font,
                         fill=(75, 75, 75),
                     )
                     draw.text(
-                        (x + 18, y + 53),
+                        (x + 18, y + 66),
                         f"Armor {g.get('armor', '-')}   ·   Boots {g.get('boots', '-')}",
                         font=gear_font,
                         fill=(75, 75, 75),
                     )
                 else:
                     draw.text((x, y), f"{pos + 1}. -", font=small_font, fill=(100, 100, 100))
-                y += 83
+                y += 102
 
         for chunk_start in range(0, len(detail_rows), chunk_size):
             chunk = detail_rows[chunk_start:chunk_start + chunk_size]

@@ -2104,20 +2104,68 @@ async def kvkopponent(
             ours_mystic_rank = ours_ranks.get("mystic_rank", "-")
             opp_mystic_rank = opp_ranks.get("mystic_rank", "-")
 
+            # These five kingdom/player power categories are useful in the detailed
+            # matchup. Compare the actual player values and mark the higher one.
+            def metric_value(player, row, *keys):
+                for source in (player, row):
+                    if not isinstance(source, dict):
+                        continue
+                    for key in keys:
+                        value = source.get(key)
+                        if value is not None:
+                            return value
+                return None
+
+            # Hero Power is the leaderboard score, while the other four values
+            # come from the detailed player record when available.
+            ours_metric_values = {
+                "Hero Power": our_row.get("score"),
+                "Research": metric_value(ours_player, our_row, "research_power"),
+                "Gov. Gear": metric_value(ours_player, our_row, "governor_gear_power", "gov_gear_power"),
+                "Gov. Charm": metric_value(ours_player, our_row, "governor_charm_power", "gov_charm_power"),
+                "Pet Power": metric_value(ours_player, our_row, "pet_power"),
+            }
+            opp_metric_values = {
+                "Hero Power": opp_row.get("score"),
+                "Research": metric_value(opp_player, opp_row, "research_power"),
+                "Gov. Gear": metric_value(opp_player, opp_row, "governor_gear_power", "gov_gear_power"),
+                "Gov. Charm": metric_value(opp_player, opp_row, "governor_charm_power", "gov_charm_power"),
+                "Pet Power": metric_value(opp_player, opp_row, "pet_power"),
+            }
+
+            def metric_line(label, ours_value, opp_value):
+                ours_mark = "✓" if ours_value is not None and (opp_value is None or ours_value > opp_value) else " "
+                opp_mark = "✓" if opp_value is not None and (ours_value is None or opp_value > ours_value) else " "
+                ours_text = compact_number(ours_value) if ours_value is not None else "-"
+                opp_text = compact_number(opp_value) if opp_value is not None else "-"
+                return f"    {label:<12} {ours_mark}{ours_text:>10}   {opp_mark}{opp_text:>10}"
+
             block = [
                 f"#{idx}",
                 f"810 [{ours_tag}]{ours_name}",
-                f"    Hero Power: {compact_number(our_row.get('score'))} · TC: {detail_value(ours_player, 'town_center_level')} · Power: {compact_number(ours_player.get('power'))}",
-                f"    Mystic Trial: {compact_number(ours_mystic)} · Rank: {ours_mystic_rank}",
-            ]
-            block.extend(f"    {line}" for line in hero_block(our_detail))
-            block.extend([
+                f"    TC: {detail_value(ours_player, 'town_center_level')}",
+                f"    Mystic Trial: {ours_mystic} · Rank: {ours_mystic_rank}",
                 "",
                 f"{kingdom} [{opp_tag}]{opp_name}",
-                f"    Hero Power: {compact_number(opp_row.get('score'))} · TC: {detail_value(opp_player, 'town_center_level')} · Power: {compact_number(opp_player.get('power'))}",
-                f"    Mystic Trial: {compact_number(opp_mystic)} · Rank: {opp_mystic_rank}",
-            ])
-            block.extend(f"    {line}" for line in hero_block(opp_detail))
+                f"    TC: {detail_value(opp_player, 'town_center_level')}",
+                f"    Mystic Trial: {opp_mystic} · Rank: {opp_mystic_rank}",
+                "",
+                "    Power comparison",
+                f"    {'Metric':<12} {'810':>11}   {str(kingdom):>11}",
+                metric_line("Hero Power", ours_metric_values["Hero Power"], opp_metric_values["Hero Power"]),
+                metric_line("Research", ours_metric_values["Research"], opp_metric_values["Research"]),
+                metric_line("Gov. Gear", ours_metric_values["Gov. Gear"], opp_metric_values["Gov. Gear"]),
+                metric_line("Gov. Charm", ours_metric_values["Gov. Charm"], opp_metric_values["Gov. Charm"]),
+                metric_line("Pet Power", ours_metric_values["Pet Power"], opp_metric_values["Pet Power"]),
+                "",
+            ]
+
+            # Keep the Arena details grouped under each kingdom after the compact
+            # player/power comparison so the important matchup numbers are easy
+            # to find.
+            block.extend(f"810 {line}" for line in hero_block(our_detail))
+            block.append("")
+            block.extend(f"{kingdom} {line}" for line in hero_block(opp_detail))
             detail_blocks.append("\n".join(block))
 
     # Send deliberate public sections. The initial links, kingdom comparison,

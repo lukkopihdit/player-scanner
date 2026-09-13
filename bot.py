@@ -901,12 +901,33 @@ class ScannerBot(commands.Bot):
     async def setup_hook(self):
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
+
+            # Keep all commands guild-only. Clear and re-sync both scopes so
+            # old global registrations from earlier versions are removed.
             self.tree.clear_commands(guild=guild)
             self.tree.copy_global_to(guild=guild)
             self.tree.clear_commands(guild=None)
-            await self.tree.sync()
+
+            # Remove any previously registered global commands.
+            global_synced = await self.tree.sync()
             synced = await self.tree.sync(guild=guild)
-            print(f"Synced {len(synced)} slash commands to guild {GUILD_ID}", flush=True)
+
+            print(
+                f"Global command cleanup synced {len(global_synced)} commands; "
+                f"synced {len(synced)} slash commands to guild {GUILD_ID}.",
+                flush=True,
+            )
+            for command in synced:
+                options = []
+                for option in getattr(command, "options", []):
+                    option_name = getattr(option, "name", "?")
+                    option_type = getattr(option, "type", "?")
+                    options.append(f"{option_name}:{option_type}")
+                print(
+                    f"Registered command /{command.name}"
+                    + (f" ({', '.join(options)})" if options else ""),
+                    flush=True,
+                )
         else:
             synced = await self.tree.sync()
             print(f"Synced {len(synced)} global slash commands", flush=True)

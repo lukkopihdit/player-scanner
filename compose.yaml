@@ -9,6 +9,8 @@ services:
       MIGHTPULSE_API_KEYS: "kss_YOUR_KEY_1,kss_YOUR_KEY_2,kss_YOUR_KEY_3,kss_YOUR_KEY_4"
       NOTIFY_CHANNEL_ID: "YOUR_NOTIFICATION_CHANNEL_ID"
       GUILD_ID: "YOUR_DISCORD_SERVER_ID"
+      KVK_OPPONENT_CHANNEL_ID: "YOUR_KVK_OPPONENT_CHANNEL_ID"
+      REPORT_CHANNEL_ID: "YOUR_REPORT_CHANNEL_ID"
       DAILY_REPORT_CHANNEL_ID: "YOUR_DAILY_REPORT_CHANNEL_ID"
       WEEKLY_REPORT_CHANNEL_ID: "YOUR_WEEKLY_REPORT_CHANNEL_ID"
       REPORT_HOUR_UTC: "0"
@@ -30,9 +32,14 @@ services:
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends curl
         rm -rf /var/lib/apt/lists/*
-        curl -fL "https://raw.githubusercontent.com/lukkopihdit/player-scanner/refs/heads/main/bot.py" -o /app/bot.py
-        curl -fL "https://raw.githubusercontent.com/lukkopihdit/player-scanner/refs/heads/main/requirements.txt" -o /app/requirements.txt
+
+        CACHE_BUST=$$(date +%s)
+        curl -fL "https://raw.githubusercontent.com/lukkopihdit/player-scanner/refs/heads/main/bot.py?cache=$$CACHE_BUST" -o /app/bot.py
+        curl -fL "https://raw.githubusercontent.com/lukkopihdit/player-scanner/refs/heads/main/requirements.txt?cache=$$CACHE_BUST" -o /app/requirements.txt
+
+        echo "Installing Python dependencies..."
         pip install --no-cache-dir -r /app/requirements.txt
+
         echo "Starting bot..."
         exec python -u /app/bot.py
 

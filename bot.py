@@ -1968,12 +1968,21 @@ async def kvkopponent(
         lines.append("```text")
         tg_labels = sorted(set(our_public_tg) | set(opp_public_tg), reverse=True)
         if tg_labels:
-            left = "   ".join(f"TG {tg} × {our_public_tg.get(tg, 0)}" for tg in tg_labels)
-            right = "   ".join(f"TG {tg} × {opp_public_tg.get(tg, 0)}" for tg in tg_labels)
-            lines.append(f"810      {left}")
-            lines.append(f"{kingdom:<8} {right}")
-            if our_public_tc is not None or opp_public_tc is not None:
-                lines.append(f"TC       {our_public_tc if our_public_tc is not None else '-':>8}   {opp_public_tc if opp_public_tc is not None else '-':>8}")
+            # Keep this deliberately narrow for Discord mobile. Two short
+            # entries per line are readable without relying on fixed-width
+            # columns or causing the individual TG entries to wrap.
+            def distribution_lines(kingdom_label, tg_counts, tc_total):
+                result = [kingdom_label]
+                entries = [f"TG {tg} × {tg_counts.get(tg, 0)}" for tg in tg_labels]
+                for i in range(0, len(entries), 2):
+                    result.append(" · ".join(entries[i:i + 2]))
+                if tc_total is not None:
+                    result.append(f"TC × {tc_total}")
+                return result
+
+            lines.extend(distribution_lines("810", our_public_tg, our_public_tc))
+            lines.append("")
+            lines.extend(distribution_lines(str(kingdom), opp_public_tg, opp_public_tc))
         else:
             lines.append("No kingdom-wide TG distribution was returned by the MightPulse kingdom endpoint.")
         lines.append("```")
@@ -2050,10 +2059,17 @@ async def kvkopponent(
         lines.append("```text")
         tg_keys = sorted(set(our_tg_top100) | set(opp_tg_top100), reverse=True)
         if tg_keys:
-            left = "   ".join(f"TG {tg} × {our_tg_top100.get(tg, 0)}" for tg in tg_keys)
-            right = "   ".join(f"TG {tg} × {opp_tg_top100.get(tg, 0)}" for tg in tg_keys)
-            lines.append(f"810      {left}")
-            lines.append(f"{kingdom:<8} {right}")
+            # Two entries per line keeps this narrow enough for Discord mobile.
+            def top100_distribution_lines(kingdom_label, tg_counts):
+                result = [kingdom_label]
+                entries = [f"TG {tg} × {tg_counts.get(tg, 0)}" for tg in tg_keys]
+                for i in range(0, len(entries), 2):
+                    result.append(" · ".join(entries[i:i + 2]))
+                return result
+
+            lines.extend(top100_distribution_lines("810", our_tg_top100))
+            lines.append("")
+            lines.extend(top100_distribution_lines(str(kingdom), opp_tg_top100))
         else:
             lines.append("No TG players found in the top 100 Hero Power rankings.")
         lines.append("```")

@@ -47,33 +47,33 @@ ROSTER_FIELDS = {
     "kid": "kid",
 }
 
-BOARD_CHOICES = [
-    app_commands.Choice(name="Alliance Power", value="alliance_power"),
-    app_commands.Choice(name="Alliance Kills", value="alliance_kills"),
-    app_commands.Choice(name="Personal Power", value="personal_power"),
-    app_commands.Choice(name="Kills", value="kills"),
-    app_commands.Choice(name="Town Center", value="town_center"),
-    app_commands.Choice(name="Rebel Conquest", value="rebel_conquest"),
-    app_commands.Choice(name="Single Hero", value="single_hero"),
-    app_commands.Choice(name="Hero Total", value="hero_total"),
-    app_commands.Choice(name="Troop Power", value="troop_power"),
-    app_commands.Choice(name="Building Power", value="building_power"),
-    app_commands.Choice(name="Research Power", value="research_power"),
-    app_commands.Choice(name="Hero No Equip", value="hero_no_equip"),
-    app_commands.Choice(name="Hero Equip", value="hero_equip"),
-    app_commands.Choice(name="Governor Gear", value="gov_gear"),
-    app_commands.Choice(name="Governor Charm", value="gov_charm"),
-    app_commands.Choice(name="Pet Power", value="pet_power"),
-    app_commands.Choice(name="Island Prosperity", value="island_prosperity"),
-    app_commands.Choice(name="Migrant Score", value="migrant_score"),
-    app_commands.Choice(name="Mystic Trial", value="mystic_trial"),
-    app_commands.Choice(name="Coliseum", value="coliseum"),
-    app_commands.Choice(name="Forest of Life", value="forest_of_life"),
-    app_commands.Choice(name="Crystal Cave", value="crystal_cave"),
-    app_commands.Choice(name="Knowledge Nexus", value="knowledge_nexus"),
-    app_commands.Choice(name="Molten Fort", value="molten_fort"),
-    app_commands.Choice(name="Radiant Spire", value="radiant_spire"),
-    app_commands.Choice(name="Master Power", value="master_power"),
+BOARD_OPTIONS = [
+    ("Alliance Power", "alliance_power"),
+    ("Alliance Kills", "alliance_kills"),
+    ("Personal Power", "personal_power"),
+    ("Kills", "kills"),
+    ("Town Center", "town_center"),
+    ("Rebel Conquest", "rebel_conquest"),
+    ("Single Hero", "single_hero"),
+    ("Hero Total", "hero_total"),
+    ("Troop Power", "troop_power"),
+    ("Building Power", "building_power"),
+    ("Research Power", "research_power"),
+    ("Hero No Equip", "hero_no_equip"),
+    ("Hero Equip", "hero_equip"),
+    ("Governor Gear", "gov_gear"),
+    ("Governor Charm", "gov_charm"),
+    ("Pet Power", "pet_power"),
+    ("Island Prosperity", "island_prosperity"),
+    ("Migrant Score", "migrant_score"),
+    ("Mystic Trial", "mystic_trial"),
+    ("Coliseum", "coliseum"),
+    ("Forest of Life", "forest_of_life"),
+    ("Crystal Cave", "crystal_cave"),
+    ("Knowledge Nexus", "knowledge_nexus"),
+    ("Molten Fort", "molten_fort"),
+    ("Radiant Spire", "radiant_spire"),
+    ("Master Power", "master_power"),
 ]
 
 CHANGE_CHOICES = [
@@ -1484,9 +1484,18 @@ async def alliancehealth(interaction: discord.Interaction, tag: str):
     await interaction.response.send_message(f"**{tag} health score: {score}/100**\nAverage power: {compact_number(avg_power)}\nInactive 7d+: {inactive}\nTG 6+: {high}", ephemeral=True)
 
 
-@bot.tree.command(name="top", description="Show a Kingdom 810 leaderboard")
+async def board_autocomplete(interaction: discord.Interaction, current: str):
+    text = current.strip().lower()
+    return [
+        app_commands.Choice(name=name, value=value)
+        for name, value in BOARD_OPTIONS
+        if text in name.lower() or text in value.lower()
+    ][:25]
+
+
+@bot.tree.command(name="top", description="Show a Kingdom 810 leaderboard. Start typing to select a board.")
 @app_commands.describe(board="Leaderboard", limit="Number of results")
-@app_commands.choices(board=BOARD_CHOICES)
+@app_commands.autocomplete(board=board_autocomplete)
 async def top(interaction: discord.Interaction, board: app_commands.Choice[str], limit: app_commands.Range[int, 1, 100] = 20):
     await interaction.response.defer(ephemeral=True)
     data = await scanner.api.get(f"/kingdoms/{KINGDOM_ID}/ranks?board={urllib.parse.quote(board.value, safe='')}&limit={limit}")

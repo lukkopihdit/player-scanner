@@ -2014,7 +2014,10 @@ async def kvkopponent(
                 out.append(f"         Gear: {gear_text}")
             return out or ["Heroes: unavailable"]
 
-        lines.append("\n**Top 5 Hero Power comparison · detailed**")
+        # Build the detailed top-5 comparison as independent player blocks.
+        # Each block is sent as its own public Discord message so Discord cannot
+        # split or truncate the detailed information.
+        detail_blocks = []
         for idx, (our_row, our_detail, opp_row, opp_detail) in enumerate(detail_rows, 1):
             ours_player = detail_player(our_row, our_detail)
             opp_player = detail_player(opp_row, opp_detail)
@@ -2033,82 +2036,56 @@ async def kvkopponent(
             ours_mystic_rank = ours_ranks.get("mystic_rank", "-")
             opp_mystic_rank = opp_ranks.get("mystic_rank", "-")
 
-            lines.append("```text")
-            lines.append(f"#{idx}")
-            lines.append(f"810 [{ours_tag}]{ours_name}")
-            lines.append(
-                f"    Hero {compact_number(our_row.get('score'))} · "
-                f"TC {detail_value(ours_player, 'town_center_level')} · "
-                f"Power {compact_number(ours_player.get('power'))}"
-            )
-            lines.append(f"    Mystic Trial {compact_number(ours_mystic)} · Rank {ours_mystic_rank}")
-            lines.extend(f"    {line}" for line in hero_block(our_detail))
-            lines.append("")
-            lines.append(f"{kingdom} [{opp_tag}]{opp_name}")
-            lines.append(
-                f"    Hero {compact_number(opp_row.get('score'))} · "
-                f"TC {detail_value(opp_player, 'town_center_level')} · "
-                f"Power {compact_number(opp_player.get('power'))}"
-            )
-            lines.append(f"    Mystic Trial {compact_number(opp_mystic)} · Rank {opp_mystic_rank}")
-            lines.extend(f"    {line}" for line in hero_block(opp_detail))
-            lines.append("```")
+            block = [
+                f"#{idx}",
+                f"810 [{ours_tag}]{ours_name}",
+                f"    Hero Power: {compact_number(our_row.get('score'))} · TC: {detail_value(ours_player, 'town_center_level')} · Power: {compact_number(ours_player.get('power'))}",
+                f"    Mystic Trial: {compact_number(ours_mystic)} · Rank: {ours_mystic_rank}",
+            ]
+            block.extend(f"    {line}" for line in hero_block(our_detail))
+            block.extend([
+                "",
+                f"{kingdom} [{opp_tag}]{opp_name}",
+                f"    Hero Power: {compact_number(opp_row.get('score'))} · TC: {detail_value(opp_player, 'town_center_level')} · Power: {compact_number(opp_player.get('power'))}",
+                f"    Mystic Trial: {compact_number(opp_mystic)} · Rank: {opp_mystic_rank}",
+            ])
+            block.extend(f"    {line}" for line in hero_block(opp_detail))
+            detail_blocks.append("\n".join(block))
 
-    # Send deliberate public sections instead of arbitrarily cutting a long response.
-    # This keeps each section readable and prevents Discord from splitting a code block.
+    # Send deliberate public sections. The initial links, kingdom comparison,
+    # rough top-20 comparison, and each detailed top-5 block are separate
+    # messages so Discord does not split a code block in the middle.
     text = "\n".join(lines)
-
     compare_marker = "**Quick Kingdom Comparison · no troop power**"
     rough_marker = "**Top 20 Hero Power comparison · rough**"
-    detail_marker = "**Top 5 Hero Power comparison · detailed**"
 
     first_end = text.find(compare_marker)
     if first_end < 0:
         first_end = len(text)
 
     first = text[:first_end].strip()
-    await interaction.followup.send(first, ephemeral=False)
+    if first:
+        await interaction.followup.send(first, ephemeral=False)
 
     if compare_marker in text:
         compare_start = text.find(compare_marker)
         rough_start = text.find(rough_marker, compare_start)
-        detail_start = text.find(detail_marker, rough_start if rough_start >= 0 else compare_start)
-
         comparison = text[compare_start:rough_start if rough_start >= 0 else len(text)].strip()
-        if rough_start >= 0:
-            rough = text[rough_start:detail_start if detail_start >= 0 else len(text)].strip()
-        else:
-            rough = ""
-        if detail_start >= 0:
-            detail = text[detail_start:].strip()
-        else:
-            detail = ""
-
         if comparison:
             await interaction.followup.send(comparison, ephemeral=False)
+
+        rough = text[rough_start:].strip() if rough_start >= 0 else ""
         if rough:
             await interaction.followup.send(rough, ephemeral=False)
-        if detail:
-            # The detailed section is kept in complete player blocks. If it is too long,
-            # split only between players and keep each resulting message a valid code box.
-            detail_body = detail.replace(detail_marker, "", 1).strip()
-            detail_parts = [part.strip() for part in detail_body.split("```text") if part.strip()]
 
-            pending = []
-            for block in detail_parts:
-                candidate = "\n\n".join(pending + [block]).strip()
-                wrapped = f"{detail_marker}\n```text\n{candidate}\n```"
-                if pending and len(wrapped) > 1900:
-                    await interaction.followup.send(
-                        f"{detail_marker}\n```text\n{'\n\n'.join(pending)}\n```",
-                        ephemeral=False,
-                    )
-                    pending = [block]
-                else:
-                    pending.append(block)
-            if pending:
+        if detail_blocks:
+            await interaction.followup.send(
+                "**Top 5 Hero Power comparison · detailed**",
+                ephemeral=False,
+            )
+            for block in detail_blocks:
                 await interaction.followup.send(
-                    f"{detail_marker}\n```text\n{'\n\n'.join(pending)}\n```",
+                    f"```text\n{block}\n```",
                     ephemeral=False,
                 )
 

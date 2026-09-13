@@ -1702,14 +1702,14 @@ async def weeklyreport(interaction: discord.Interaction):
 
 
 
-@bot.tree.command(name="kvkopponent", description="Show links to a kingdom, its top 5 alliances, and top 10 players")
+@bot.tree.command(name="kvkopponent", description="Show links to an opponent kingdom, top 5 alliances, and top 25 players by hero power")
 @app_commands.describe(kingdom="Opponent kingdom number")
 async def kvkopponent(interaction: discord.Interaction, kingdom: app_commands.Range[int, 1, 99999]):
     await interaction.response.defer(ephemeral=True)
 
-    # Fetch top alliances and top players from the opponent kingdom.
+    # Top 5 alliances by alliance power, and top 25 players by hero power.
     alliances_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=alliance_power&limit=5")
-    players_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=personal_power&limit=10")
+    players_data = await scanner.api.get(f"/kingdoms/{kingdom}/ranks?board=hero_total&limit=25")
 
     if not alliances_data and not players_data:
         await interaction.followup.send(
@@ -1724,7 +1724,7 @@ async def kvkopponent(interaction: discord.Interaction, kingdom: app_commands.Ra
 
     player_rows = []
     if players_data and players_data.get("boards"):
-        player_rows = players_data["boards"][0].get("rows", [])[:10]
+        player_rows = players_data["boards"][0].get("rows", [])[:25]
 
     lines = [f"**Kingdom {kingdom}**", f"<https://mightpulse.com/kingdom/{kingdom}>"]
 
@@ -1738,17 +1738,18 @@ async def kvkopponent(interaction: discord.Interaction, kingdom: app_commands.Ra
     else:
         lines.append("No alliance leaderboard data returned.")
 
-    lines.append("\n**Top 10 players**")
+    lines.append("\n**Top 25 players · Hero Power**")
     if player_rows:
         for row in player_rows:
             uid = row.get("uid")
             name = row.get("nick_name") or "Unknown"
+            score = compact_number(row.get("score"))
             if uid:
-                lines.append(f"#{row.get('rank', '?')} {name} — <https://mightpulse.com/player/{uid}>")
+                lines.append(f"#{row.get('rank', '?')} {name} · {score} — <https://mightpulse.com/player/{uid}>")
             else:
-                lines.append(f"#{row.get('rank', '?')} {name}")
+                lines.append(f"#{row.get('rank', '?')} {name} · {score}")
     else:
-        lines.append("No personal-power leaderboard data returned.")
+        lines.append("No hero-power leaderboard data returned.")
 
     await interaction.followup.send("\n".join(lines), ephemeral=True)
 

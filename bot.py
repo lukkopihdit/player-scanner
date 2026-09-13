@@ -1772,6 +1772,84 @@ async def weeklyreport(interaction: discord.Interaction):
 
 
 
+@bot.tree.command(name="clearkvkchannel", description="Delete every message from the configured #kvk-opponent channel")
+@app_commands.describe(yes="Set to True to confirm that every message in #kvk-opponent should be deleted")
+@app_commands.default_permissions(manage_messages=True)
+async def clearkvkchannel(interaction: discord.Interaction, yes: bool = False):
+    # This is intentionally a destructive command. Require an explicit True
+    # confirmation and Manage Messages permission.
+    if not yes:
+        await interaction.response.send_message(
+            "Nothing was deleted. Use `/clearkvkchannel yes:True` to confirm deletion of every message in #kvk-opponent.",
+            ephemeral=True,
+        )
+        return
+
+    if not KVK_OPPONENT_CHANNEL_ID:
+        await interaction.response.send_message(
+            "KVK_OPPONENT_CHANNEL_ID is not configured in Compose.",
+            ephemeral=True,
+        )
+        return
+
+    # Enforce the permission server-side as well. Discord's default_permissions
+    # only controls command visibility and is not a substitute for this check.
+    if not isinstance(interaction.user, discord.Member) or not (
+        interaction.user.guild_permissions.manage_messages
+        or interaction.user.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "You need the Manage Messages permission to use this command.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        channel = bot.get_channel(KVK_OPPONENT_CHANNEL_ID)
+        if channel is None:
+            channel = await bot.fetch_channel(KVK_OPPONENT_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "KVK_OPPONENT_CHANNEL_ID does not point to a normal text channel.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        deleted = await channel.purge(
+            limit=None,
+            bulk=True,
+            reason=f"/clearkvkchannel used by {interaction.user} ({interaction.user.id})",
+        )
+        await interaction.followup.send(
+            f"Deleted **{len(deleted)}** messages from {channel.mention}.",
+            ephemeral=True,
+        )
+    except discord.Forbidden:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "I do not have permission to delete messages in #kvk-opponent. I need Manage Messages there.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "I do not have permission to delete messages in #kvk-opponent. I need Manage Messages there.",
+                ephemeral=True,
+            )
+    except Exception as exc:
+        print(f"Failed to clear KVK opponent channel: {exc}", flush=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "The channel could not be cleared. Check the bot's channel permissions and logs.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "The channel could not be cleared. Check the bot's channel permissions and logs.",
+                ephemeral=True,
+            )
+
+
 @bot.tree.command(name="kvkopponent", description="Show opponent links, top 5 alliances, top 20 hero-power players, and an optional kingdom comparison")
 @app_commands.describe(
     kingdom="Opponent kingdom number",
@@ -2076,21 +2154,35 @@ async def kvkopponent(
 
         lines.append("\n**Top 20 Hero Power comparison · rough**")
         lines.append("```text")
-        lines.append(f"{'#':>2}  {'Kingdom 810':<24} {'Opponent':<24}")
         for idx in range(20):
             left = our_top20[idx] if idx < len(our_top20) else {}
             right = opponent_top20[idx] if idx < len(opponent_top20) else {}
-            left_name = (left.get("nick_name") or "-")[:14]
-            right_name = (right.get("nick_name") or "-")[:14]
+            left_name = left.get("nick_name") or "-"
+            right_name = right.get("nick_name") or "-"
+            left_tag = left.get("alliance_abbr") or "-"
+            right_tag = right.get("alliance_abbr") or "-"
             left_score_val = left.get("score") if left else None
             right_score_val = right.get("score") if right else None
-            left_score = compact_number(left_score_val) if left else "-"
-            right_score = compact_number(right_score_val) if right else "-"
-            left_mark = "✓" if left_score_val is not None and (right_score_val is None or left_score_val > right_score_val) else " "
-            right_mark = "✓" if right_score_val is not None and (left_score_val is None or right_score_val > left_score_val) else " "
-            lines.append(
-                f"{idx + 1:>2}  {left_mark}{left_name:<14} {left_score:>7}   {right_mark}{right_name:<14} {right_score:>7}"
-            )
+            left_score = compact_number(left_score_val) if left_score_val is not None else "-"
+            right_score = compact_number(right_score_val) if right_score_val is not None else "-"
+            if left_score_val is not None and right_score_val is not None:
+                if left_score_val > right_score_val:
+                    left_mark, right_mark = " ▲", ""
+                elif right_score_val > left_score_val:
+                    left_mark, right_mark = "", " ▲"
+                else:
+                    left_mark, right_mark = " =", " ="
+            elif left_score_val is not None:
+                left_mark, right_mark = " ▲", ""
+            elif right_score_val is not None:
+                left_mark, right_mark = "", " ▲"
+            else:
+                left_mark, right_mark = "", ""
+            lines.append(f"#{idx + 1}")
+            lines.append(f"810 [{left_tag}]{left_name} · {left_score}{left_mark}")
+            lines.append(f"{kingdom} [{right_tag}]{right_name} · {right_score}{right_mark}")
+            if idx != 19:
+                lines.append("")
         lines.append("```")
 
         # Fetch the component leaderboards once and match the top-5 players to
@@ -2625,21 +2717,9 @@ async def kvkopponent(
             await send_section(rough)
 
         if detail_blocks:
-            try:
-                report_images = _render_kvk_images(detail_rows, kingdom)
-                if report_images:
-                    for image_index, image_buffer in enumerate(report_images, 1):
-                        filename = f"kvk_{KINGDOM_ID}_vs_{kingdom}_part_{image_index}.png"
-                        file = discord.File(image_buffer, filename=filename)
-                        if target_channel is not None:
-                            await target_channel.send(file=file)
-                        else:
-                            await interaction.followup.send(file=file, ephemeral=False)
-                else:
-                    await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
-            except Exception as exc:
-                print(f"Could not render KvK comparison image: {exc}", flush=True)
-                await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
+            await send_section(f"**Top {len(detail_blocks)} Hero Power comparison · detailed**")
+            for block in detail_blocks:
+                await send_section("```text\n" + block + "\n```")
 
     if target_channel is not None:
         await interaction.followup.send(

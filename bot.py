@@ -2352,18 +2352,32 @@ async def kvkopponent(
         return "="
 
     def _render_kvk_images(detail_rows, kingdom_id):
-        """Render clean, plain comparison images. Five player pairs per image."""
+        """Render mobile-readable, plain comparison images.
+
+        Two player matchups per image.  The previous version packed five very
+        tall cards into a single 1500px-wide image, which Discord scaled down
+        aggressively on phones and made the text microscopic.
+        """
         images = []
         if not detail_rows:
             return images
-        title_font = _font(42, True)
-        subtitle_font = _font(27, True)
-        section_font = _font(25, True)
-        body_font = _font(22)
-        body_bold = _font(22, True)
-        small_font = _font(18)
-        width = 1500
-        chunk_size = 5
+
+        # Deliberately large fonts. Discord will scale the image to the phone's
+        # available width, so readability depends much more on font size than
+        # on trying to squeeze everything into one enormous image.
+        title_font = _font(34, True)
+        subtitle_font = _font(24, True)
+        section_font = _font(24, True)
+        body_font = _font(24)
+        body_bold = _font(24, True)
+        small_font = _font(21)
+        gear_font = _font(19)
+
+        width = 1200
+        chunk_size = 2
+        margin = 30
+        gap = 18
+        card_height = 690
 
         def component_value(row, player, index, label):
             for source in (row, player):
@@ -2395,28 +2409,122 @@ async def kvkopponent(
         def gear(hero):
             vals = {}
             for item in hero.get("gear") or []:
-                if isinstance(item, dict):
-                    slot = str(item.get("slot") or item.get("name") or "").lower()
-                    enh, ref = item.get("enhancement_level"), item.get("refine_level")
-                    if enh is None and ref is None:
-                        value = "-"
-                    elif ref is None:
-                        value = f"+{enh}"
-                    elif enh is None:
-                        value = f"R{ref}"
-                    else:
-                        value = f"+{enh}/R{ref}"
-                    for key in ("helmet", "gloves", "armor", "boots"):
-                        if key in slot:
-                            vals[key] = value
+                if not isinstance(item, dict):
+                    continue
+                slot = str(item.get("slot") or item.get("name") or "").lower()
+                enh = item.get("enhancement_level")
+                ref = item.get("refine_level")
+                if enh is None and ref is None:
+                    value = "-"
+                elif ref is None:
+                    value = f"+{enh}"
+                elif enh is None:
+                    value = f"R{ref}"
+                else:
+                    value = f"+{enh}/R{ref}"
+                for key in ("helmet", "gloves", "armor", "boots"):
+                    if key in slot:
+                        vals[key] = value
             return vals
+
+        def draw_hero_column(draw, x, y, hero_list):
+            for pos in range(5):
+                hero = hero_list[pos] if pos < len(hero_list) else None
+                if hero:
+                    g = gear(hero)
+                    widget = hero.get("exclusive_gear_level")
+                    widget_text = f"Widget: {widget}" if widget is not None else "Widget: -"
+                    draw.text(
+                        (x, y),
+                        f"{pos + 1}. {hero.get('name', 'Unknown')} · {widget_text}",
+                        font=small_font,
+                        fill=(25, 25, 25),
+                    )
+                    draw.text(
+                        (x + 18, y + 29),
+                        f"Helmet {g.get('helmet', '-')}   ·   Gloves {g.get('gloves', '-')}",
+                        font=gear_font,
+                        fill=(75, 75, 75),
+                    )
+                    draw.text(
+                        (x + 18, y + 53),
+                        f"Armor {g.get('armor', '-')}   ·   Boots {g.get('boots', '-')}",
+                        font=gear_font,
+                        fill=(75, 75, 75),
+                    )
+                else:
+                    draw.text((x, y), f"{pos + 1}. -", font=small_font, fill=(100, 100, 100))
+                y += 83
 
         for chunk_start in range(0, len(detail_rows), chunk_size):
             chunk = detail_rows[chunk_start:chunk_start + chunk_size]
-            rows_render = []
-            for idx, (orow, od, prow, pd) in enumerate(chunk, chunk_start + 1):
+            height = 145 + len(chunk) * (card_height + gap)
+            img = Image.new("RGB", (width, height), "white")
+            draw = ImageDraw.Draw(img)
+
+            y = 22
+            draw.text((margin, y), "KvK Opponent Comparison", font=title_font, fill=(15, 15, 15))
+            y += 43
+            draw.text(
+                (margin, y),
+                f"Kingdom 810 vs Kingdom {kingdom_id} · #{chunk_start + 1}–#{chunk_start + len(chunk)}",
+                font=subtitle_font,
+                fill=(45, 45, 45),
+            )
+            y += 38
+            draw.line((margin, y, width - margin, y), fill=(180, 180, 180), width=2)
+            y += 16
+
+            for row_offset, (orow, od, prow, pd) in enumerate(chunk):
+                card_top = y
+                card_bottom = card_top + card_height
+                draw.rectangle(
+                    (margin, card_top, width - margin, card_bottom),
+                    outline=(190, 190, 190),
+                    width=2,
+                )
+                draw.rectangle(
+                    (margin, card_top, width - margin, card_top + 45),
+                    fill=(235, 235, 235),
+                )
+                idx = chunk_start + row_offset + 1
+                draw.text((margin + 14, card_top + 8), f"#{idx}", font=section_font, fill=(15, 15, 15))
+
+                col_gap = 28
+                col_w = (width - 2 * margin - col_gap) // 2
+                left_x = margin + 18
+                right_x = left_x + col_w + col_gap
+                content_y = card_top + 61
+
                 op, oname, otag, olvl, omystic, orank = player_info(orow, od)
                 pp, pname, ptag, plvl, pmystic, prank = player_info(prow, pd)
+
+                draw.text((left_x, content_y), f"810 [{otag}]{oname}", font=body_bold, fill=(15, 15, 15))
+                draw.text((right_x, content_y), f"{kingdom_id} [{ptag}]{pname}", font=body_bold, fill=(15, 15, 15))
+                content_y += 34
+
+                draw.text((left_x, content_y), level_label(olvl), font=body_font, fill=(35, 35, 35))
+                draw.text((right_x, content_y), level_label(plvl), font=body_font, fill=(35, 35, 35))
+                content_y += 31
+
+                draw.text(
+                    (left_x, content_y),
+                    f"Mystic Trial: {omystic if omystic is not None else '-'} · Rank: {orank if orank is not None else '-'}",
+                    font=small_font,
+                    fill=(60, 60, 60),
+                )
+                draw.text(
+                    (right_x, content_y),
+                    f"Mystic Trial: {pmystic if pmystic is not None else '-'} · Rank: {prank if prank is not None else '-'}",
+                    font=small_font,
+                    fill=(60, 60, 60),
+                )
+                content_y += 38
+
+                draw.text((left_x, content_y), "Power Comparison", font=section_font, fill=(20, 20, 20))
+                draw.text((right_x, content_y), "Power Comparison", font=section_font, fill=(20, 20, 20))
+                content_y += 34
+
                 metrics = [
                     ("Hero Power", orow.get("score"), prow.get("score")),
                     ("Research", component_value(orow, op, our_component_index, "Research"), component_value(prow, pp, opp_component_index, "Research")),
@@ -2424,72 +2532,39 @@ async def kvkopponent(
                     ("Gov. Charm", component_value(orow, op, our_component_index, "Gov. Charm"), component_value(prow, pp, opp_component_index, "Gov. Charm")),
                     ("Pet Power", component_value(orow, op, our_component_index, "Pet Power"), component_value(prow, pp, opp_component_index, "Pet Power")),
                 ]
-                rows_render.append((idx, op, oname, otag, olvl, omystic, orank, pp, pname, ptag, plvl, pmystic, prank, metrics))
 
-            # Estimate height based on content. Plain white report, intentionally no decorative nonsense.
-            height = 180 + len(rows_render) * 560
-            img = Image.new("RGB", (width, height), "white")
-            draw = ImageDraw.Draw(img)
-            margin = 36
-            y = 28
-            draw.text((margin, y), "KvK Opponent Comparison", font=title_font, fill=(15, 15, 15)); y += 52
-            draw.text((margin, y), f"Kingdom 810 vs Kingdom {kingdom_id}", font=subtitle_font, fill=(30, 30, 30)); y += 42
-            draw.text((margin, y), f"Detailed comparison · #{chunk_start + 1}–#{chunk_start + len(chunk)}", font=body_font, fill=(70, 70, 70)); y += 38
-            draw.line((margin, y, width-margin, y), fill=(180,180,180), width=2); y += 22
-
-            for item in rows_render:
-                idx, op, oname, otag, olvl, omystic, orank, pp, pname, ptag, plvl, pmystic, prank, metrics = item
-                card_top = y
-                draw.rectangle((margin, card_top, width-margin, card_top+520), outline=(190,190,190), width=2)
-                draw.rectangle((margin, card_top, width-margin, card_top+48), fill=(235,235,235))
-                draw.text((margin+14, card_top+10), f"#{idx}", font=section_font, fill=(15,15,15))
-                y = card_top + 62
-                col_w = (width - 2*margin - 24) // 2
-                left_x = margin + 12
-                right_x = margin + 12 + col_w + 12
-                draw.text((left_x, y), f"810 [{otag}]{oname}", font=body_bold, fill=(15,15,15))
-                draw.text((right_x, y), f"{kingdom_id} [{ptag}]{pname}", font=body_bold, fill=(15,15,15)); y += 34
-                draw.text((left_x, y), level_label(olvl), font=body_font, fill=(35,35,35))
-                draw.text((right_x, y), level_label(plvl), font=body_font, fill=(35,35,35)); y += 30
-                draw.text((left_x, y), f"Mystic Trial: {omystic if omystic is not None else '-'} · Rank: {orank if orank is not None else '-'}", font=small_font, fill=(60,60,60))
-                draw.text((right_x, y), f"Mystic Trial: {pmystic if pmystic is not None else '-'} · Rank: {prank if prank is not None else '-'}", font=small_font, fill=(60,60,60)); y += 38
-                draw.text((left_x, y), "Power Comparison", font=section_font, fill=(20,20,20)); y += 30
                 for label, a, b in metrics:
                     winner = _metric_winner(a, b)
                     at = compact_number(a) if a is not None else "-"
                     bt = compact_number(b) if b is not None else "-"
-                    result = "=" if winner == "=" else (f"✓ {winner}" if winner else "")
-                    draw.text((left_x, y), f"{label}: {at}", font=small_font, fill=(30,30,30))
-                    draw.text((right_x, y), f"{bt}  {result}", font=small_font, fill=(30,30,30)); y += 25
+                    if winner == "=":
+                        left_mark, right_mark = "=", "="
+                    elif winner == "810":
+                        left_mark, right_mark = "✓", ""
+                    elif winner:
+                        left_mark, right_mark = "", "✓"
+                    else:
+                        left_mark, right_mark = "", ""
+                    draw.text((left_x, content_y), f"{label}: {at} {left_mark}", font=small_font, fill=(30, 30, 30))
+                    draw.text((right_x, content_y), f"{label}: {bt} {right_mark}", font=small_font, fill=(30, 30, 30))
+                    content_y += 27
 
-                y += 10
-                # Arena tables, side-by-side, compact like the reference image.
-                draw.text((left_x, y), "Arena", font=section_font, fill=(20,20,20))
-                draw.text((right_x, y), "Arena", font=section_font, fill=(20,20,20)); y += 30
-                left_h = heroes(od); right_h = heroes(pd)
-                for pos in range(5):
-                    lh = left_h[pos] if pos < len(left_h) else None
-                    rh = right_h[pos] if pos < len(right_h) else None
-                    if lh:
-                        g = gear(lh)
-                        txt = f"{pos+1}. {lh.get('name','Unknown')} · Widget: {lh.get('exclusive_gear_level','-')}"
-                        draw.text((left_x, y), txt, font=small_font, fill=(30,30,30))
-                        draw.text((left_x, y+21), f"Helmet {g.get('helmet','-')} · Gloves {g.get('gloves','-')}", font=_font(16), fill=(70,70,70))
-                        draw.text((left_x, y+40), f"Armor {g.get('armor','-')} · Boots {g.get('boots','-')}", font=_font(16), fill=(70,70,70))
-                    if rh:
-                        g = gear(rh)
-                        txt = f"{pos+1}. {rh.get('name','Unknown')} · Widget: {rh.get('exclusive_gear_level','-')}"
-                        draw.text((right_x, y), txt, font=small_font, fill=(30,30,30))
-                        draw.text((right_x, y+21), f"Helmet {g.get('helmet','-')} · Gloves {g.get('gloves','-')}", font=_font(16), fill=(70,70,70))
-                        draw.text((right_x, y+40), f"Armor {g.get('armor','-')} · Boots {g.get('boots','-')}", font=_font(16), fill=(70,70,70))
-                    y += 66
-                y = card_top + 540
-            # Crop excess whitespace
-            img = img.crop((0, 0, width, min(y + 20, height)))
+                content_y += 8
+                draw.text((left_x, content_y), "Arena · 810", font=section_font, fill=(20, 20, 20))
+                draw.text((right_x, content_y), f"Arena · {kingdom_id}", font=section_font, fill=(20, 20, 20))
+                content_y += 31
+
+                draw_hero_column(draw, left_x, content_y, heroes(od))
+                draw_hero_column(draw, right_x, content_y, heroes(pd))
+
+                y = card_bottom + gap
+
+            img = img.crop((0, 0, width, y - gap + 12))
             bio = io.BytesIO()
             img.save(bio, format="PNG", optimize=True)
             bio.seek(0)
             images.append(bio)
+
         return images
 
     # Send deliberate public sections. The initial links, kingdom comparison,

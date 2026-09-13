@@ -2274,14 +2274,14 @@ async def kvkopponent(
                 opp_text = compact_number(opp_value) if opp_value is not None else "-"
                 if ours_value is not None and opp_value is not None:
                     if ours_value > opp_value:
-                        return f"    {label}: 810 {ours_text} ✓ · {kingdom} {opp_text}"
+                        return f"    {label}: 810 {ours_text} ▲ · {kingdom} {opp_text}"
                     if opp_value > ours_value:
-                        return f"    {label}: 810 {ours_text} · {kingdom} {opp_text} ✓"
+                        return f"    {label}: 810 {ours_text} · {kingdom} {opp_text} ▲"
                     return f"    {label}: 810 {ours_text} = {kingdom} {opp_text}"
                 if ours_value is not None:
-                    return f"    {label}: 810 {ours_text} ✓ · {kingdom} -"
+                    return f"    {label}: 810 {ours_text} ▲ · {kingdom} -"
                 if opp_value is not None:
-                    return f"    {label}: 810 - · {kingdom} {opp_text} ✓"
+                    return f"    {label}: 810 - · {kingdom} {opp_text} ▲"
                 return f"    {label}: 810 - · {kingdom} -"
 
             block = [
@@ -2364,22 +2364,22 @@ async def kvkopponent(
         # Deliberately large fonts. Discord will scale the image to the phone's
         # available width, so readability depends much more on font size than
         # on trying to squeeze everything into one enormous image.
-        title_font = _font(34, True)
-        subtitle_font = _font(24, True)
-        section_font = _font(24, True)
-        body_font = _font(24)
-        body_bold = _font(24, True)
-        small_font = _font(21)
-        gear_font = _font(19)
+        title_font = _font(38, True)
+        subtitle_font = _font(27, True)
+        section_font = _font(27, True)
+        body_font = _font(27)
+        body_bold = _font(28, True)
+        small_font = _font(24)
+        gear_font = _font(22)
 
-        width = 1200
+        width = 1400
         chunk_size = 2
-        margin = 30
-        gap = 18
+        margin = 36
+        gap = 24
         # The previous 690px card was too short for five Arena heroes, so the
         # bottom of the fifth hero was being clipped. Keep two comparisons per
         # image, but give each card enough vertical space for every field.
-        card_height = 835
+        card_height = 965
 
         def component_value(row, player, index, label):
             for source in (row, player):
@@ -2545,9 +2545,9 @@ async def kvkopponent(
                     if winner == "=":
                         left_mark, right_mark = "=", "="
                     elif winner == "810":
-                        left_mark, right_mark = "✓", ""
+                        left_mark, right_mark = "▲", ""
                     elif winner:
-                        left_mark, right_mark = "", "✓"
+                        left_mark, right_mark = "", "▲"
                     else:
                         left_mark, right_mark = "", ""
                     draw.text((left_x, content_y), f"{label}: {at} {left_mark}", font=small_font, fill=(30, 30, 30))

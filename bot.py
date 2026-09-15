@@ -507,36 +507,16 @@ class Database:
                 )
                 if await cur2.fetchone():
                     continue
-
-                # Disappearing from the top-100 tracked alliances does not
-                # necessarily mean the player left the kingdom. Confirm the
-                # current kingdom through the documented player API.
-                try:
-                    current = await self.api.get_player_full(str(row["governor_id"]))
-                except Exception as exc:
-                    print(f"Departure verification failed for {row['governor_id']}: {exc}", flush=True)
-                    continue
-
-                if not current:
-                    continue
-
-                current_kid = current.get("kid")
-                if current_kid is None or str(current_kid) == str(KINGDOM_ID):
-                    # Still in this kingdom, presumably in an alliance outside
-                    # the tracked top 100.
-                    continue
-
-                destination_kid = str(current_kid)
+                # Only classify a departure when the whole scan was successful.
                 changes.append({
                     "governor_id": str(row["governor_id"]),
-                    "nick_name": current.get("nick_name") or row["nick_name"],
+                    "nick_name": row["nick_name"],
                     "alliance_tag": row["alliance_tag"],
                     "change_type": "left_tracked",
                     "old_value": row["alliance_tag"],
-                    "new_value": destination_kid,
+                    "new_value": "Not in tracked top 100",
                     "created_at": scan_time,
                 })
-
             for c in changes:
                 await db.execute(
                     "INSERT INTO changes(governor_id,nick_name,alliance_tag,change_type,old_value,new_value,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -1093,6 +1073,10 @@ scanner = Scanner(Database(DB_PATH))
 bot = ScannerBot(scanner)
 
 
+compare_group = app_commands.Group(name="compare", description="Compare players")
+bot.tree.add_command(compare_group)
+
+
 @bot.tree.command(name="status", description="Show scanner status for kingdom 810")
 async def status(interaction: discord.Interaction):
     players, alliances, changes, last_scan = await scanner.db.status()
@@ -1639,7 +1623,8 @@ async def dashboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="compare", description="Compare up to five players by ID")
+@compare_group.command(name="players", description="Compare 2 to 5 players by ID")
+@compare.command(name="quick", description="Quickly compare 2-5 players by ID")
 @app_commands.describe(
     id1="First player ID (baseline)",
     id2="Second player ID",
@@ -1647,7 +1632,7 @@ async def dashboard(interaction: discord.Interaction):
     id4="Fourth player ID",
     id5="Fifth player ID",
 )
-async def compare(
+async def compare_players(
     interaction: discord.Interaction,
     id1: str,
     id2: str,
@@ -1840,6 +1825,461 @@ async def compare(
                 current_len = len("```text\n```")
             current.append(line)
             current_len += add_len
+        if current:
+            chunks.append("```text\n" + "\n".join(current) + "\n```")
+        for chunk in chunks:
+            await interaction.followup.send(chunk, ephemeral=True)
+
+
+@compare_group.command(name="detail", description="Detailed comparison of exactly 2 players")
+@app_commands.describe(
+    id1="First player ID",
+    id2="Second player ID",
+)
+async def compare_detail(interaction: discord.Interaction, id1: str, id2: str):
+    """Detailed two-player comparison using the same format and data as /kvkopponent."""
+    await interaction.response.defer(ephemeral=True)
+
+    identifiers = [id1.strip(), id2.strip()]
+    if not all(identifiers):
+        await interaction.followup.send("Both player IDs are required.", ephemeral=True)
+        return
+    if identifiers[0] == identifiers[1]:
+        await interaction.followup.send("Use two different player IDs.", ephemeral=True)
+        return
+
+    async def fetch_detail(identifier: str):
+        try:
+            data = await scanner.api.get_player_full(identifier, "governor_id")
+            if data and data.get("player"):
+                return data
+        except Exception as exc:
+            print(f"/compare detail lookup failed for {identifier}: {exc}", flush=True)
+        return None
+
+    first_data, second_data = await asyncio.gather(
+        fetch_detail(identifiers[0]),
+        fetch_detail(identifiers[1]),
+    )
+    if first_data is None or second_data is None:
+        missing = []
+        if first_data is None:
+            missing.append(identifiers[0])
+        if second_data is None:
+            missing.append(identifiers[1])
+        await interaction.followup.send(
+            "Could not find these player IDs: " + ", ".join(missing),
+            ephemeral=True,
+        )
+        return
+
+    first_player = first_data.get("player", {})
+    second_player = second_data.get("player", {})
+
+    def player_kingdom(player):
+        value = player.get("kid") or player.get("kingdom_id") or player.get("kingdom")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    first_kid = player_kingdom(first_player)
+    second_kid = player_kingdom(second_player)
+    if first_kid is None or second_kid is None:
+        await interaction.followup.send(
+            "Could not determine the kingdom for both players.",
+            ephemeral=True,
+        )
+        return
+
+    component_boards = [
+        ("research_power", "Research"),
+        ("gov_gear", "Gov. Gear"),
+        ("gov_charm", "Gov. Charm"),
+        ("pet_power", "Pet Power"),
+    ]
+
+    async def get_rank_rows(board: str, kingdom_id: int):
+        data = await scanner.api.get(
+            f"/kingdoms/{kingdom_id}/ranks?board={board}&limit=100"
+        )
+        return data.get("boards", [{}])[0].get("rows", [])[:100] if data else []
+
+    async def build_rank_index(kingdom_id: int):
+        results = await asyncio.gather(
+            *(get_rank_rows(board, kingdom_id) for board, _ in component_boards)
+        )
+        index = {label: {} for _, label in component_boards}
+        for (board, label), rows in zip(component_boards, results):
+            for row in rows:
+                score = row.get("score")
+                if score is None:
+                    continue
+                for key in ("governor_id", "uid"):
+                    value = row.get(key)
+                    if value is not None:
+                        index[label][str(value)] = score
+        return index
+
+    unique_kids = [first_kid] if first_kid == second_kid else [first_kid, second_kid]
+    indexes = await asyncio.gather(*(build_rank_index(kid) for kid in unique_kids))
+    component_indexes = dict(zip(unique_kids, indexes))
+
+    def component_value(player, kingdom_id, label):
+        index = component_indexes.get(kingdom_id, {})
+        for key in ("governor_id", "uid"):
+            value = player.get(key)
+            if value is not None:
+                score = index.get(label, {}).get(str(value))
+                if score is not None:
+                    return score
+        return None
+
+    def metric_values(player, kingdom_id):
+        return {
+            "Hero Power": player.get("hero_power"),
+            "Research": component_value(player, kingdom_id, "Research"),
+            "Gov. Gear": component_value(player, kingdom_id, "Gov. Gear"),
+            "Gov. Charm": component_value(player, kingdom_id, "Gov. Charm"),
+            "Pet Power": component_value(player, kingdom_id, "Pet Power"),
+        }
+
+    first_values = metric_values(first_player, first_kid)
+    second_values = metric_values(second_player, second_kid)
+
+    def alliance_tag(player):
+        alliance = player.get("alliance")
+        if isinstance(alliance, dict):
+            return alliance.get("abbr") or alliance.get("tag") or "-"
+        return player.get("alliance_tag") or player.get("alliance_abbr") or "-"
+
+    def ranks(data):
+        return data.get("ranks", {}) if isinstance(data, dict) else {}
+
+    first_ranks = ranks(first_data)
+    second_ranks = ranks(second_data)
+
+    def metric_suffix(left, right, is_left):
+        if left is None and right is None:
+            return ""
+        if left is not None and right is not None:
+            if left > right:
+                return " ▲" if is_left else ""
+            if right > left:
+                return "" if is_left else " ▲"
+            return " ="
+        return " ▲" if ((left is not None) == is_left) else ""
+
+    def player_metric_lines(values, other_values, is_left):
+        out = []
+        for label in ("Hero Power", "Research", "Gov. Gear", "Gov. Charm", "Pet Power"):
+            value = values[label]
+            other = other_values[label]
+            value_text = compact_number(value) if value is not None else "-"
+            suffix = metric_suffix(value, other, is_left)
+            out.append(f"    {label}: {value_text}{suffix}")
+        return out
+
+    def hero_gear_summary(hero):
+        gear = hero.get("gear")
+        if not isinstance(gear, list):
+            return []
+        parts = []
+        for item in gear:
+            if not isinstance(item, dict):
+                continue
+            slot = item.get("slot") or item.get("name") or "Gear"
+            enh = item.get("enhancement_level")
+            ref = item.get("refine_level")
+            if enh is None and ref is None:
+                parts.append(f"{slot}")
+            elif ref is None:
+                parts.append(f"{slot} +{enh}")
+            elif enh is None:
+                parts.append(f"{slot} R{ref}")
+            else:
+                parts.append(f"{slot} +{enh}/R{ref}")
+        return parts
+
+    def hero_block(data, kingdom_label):
+        heroes = data.get("heroes") if isinstance(data, dict) else None
+        if not isinstance(heroes, list):
+            return ["Arena: unavailable"]
+        out = [f"Heroes {kingdom_label}"]
+        shown = 0
+        for position, hero in enumerate(heroes[:5], 1):
+            if not isinstance(hero, dict):
+                continue
+            shown += 1
+            name = hero.get("name") or "Unknown"
+            widget = hero.get("exclusive_gear_level")
+            out.append(f"{position}. {name}")
+            out.append(f"   Widget: {widget if widget is not None else '-'}")
+            gear_parts = hero_gear_summary(hero)
+            if gear_parts:
+                for gear_line in gear_parts:
+                    out.append(f"   {gear_line}")
+            else:
+                out.append("   Gear: unavailable")
+        if shown == 0:
+            out.append("Unavailable")
+        return out
+
+    first_name = first_player.get("nick_name") or "-"
+    second_name = second_player.get("nick_name") or "-"
+    first_tag = alliance_tag(first_player)
+    second_tag = alliance_tag(second_player)
+    first_mystic = first_ranks.get("mystic_trial", "-")
+    second_mystic = second_ranks.get("mystic_trial", "-")
+    first_mystic_rank = first_ranks.get("mystic_rank", "-")
+    second_mystic_rank = second_ranks.get("mystic_rank", "-")
+
+    block = [
+        f"{first_kid} [{first_tag}]{first_name}",
+        f"    {level_label(first_player.get('town_center_level'))}",
+        f"    Mystic Trial: {first_mystic} · Rank: {first_mystic_rank}",
+        *player_metric_lines(first_values, second_values, True),
+        "",
+        f"{second_kid} [{second_tag}]{second_name}",
+        f"    {level_label(second_player.get('town_center_level'))}",
+        f"    Mystic Trial: {second_mystic} · Rank: {second_mystic_rank}",
+        *player_metric_lines(second_values, first_values, False),
+        "",
+        *hero_block(first_data, str(first_kid)),
+        "",
+        *hero_block(second_data, str(second_kid)),
+    ]
+
+    output = "```text\n" + "\n".join(block) + "\n```"
+    if len(output) <= 2000:
+        await interaction.followup.send(output, ephemeral=True)
+        return
+
+    # Preserve whole lines if an unusually gear-heavy matchup exceeds Discord's limit.
+    chunks = []
+    current = []
+    current_len = len("```text\n\n```")
+    for line in block:
+        extra = len(line) + (1 if current else 0)
+        if current and current_len + extra > 2000:
+            chunks.append("```text\n" + "\n".join(current) + "\n```")
+            current = []
+            current_len = len("```text\n\n```")
+        current.append(line)
+        current_len += extra
+    if current:
+        chunks.append("```text\n" + "\n".join(current) + "\n```")
+    for chunk in chunks:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+
+
+@compare.command(name="detail", description="Detailed comparison of two players")
+@app_commands.describe(
+    id1="First player ID",
+    id2="Second player ID",
+)
+async def compare_detail(interaction: discord.Interaction, id1: str, id2: str):
+    """Detailed two-player comparison using the same format as /kvkopponent."""
+    await interaction.response.defer(ephemeral=True)
+
+    identifiers = [id1.strip(), id2.strip()]
+
+    async def fetch_player(identifier: str):
+        try:
+            data = await scanner.api.get_player_full(identifier, "governor_id")
+            if data and isinstance(data.get("player"), dict):
+                return data
+        except Exception as exc:
+            print(f"/compare detail lookup failed for {identifier}: {exc}", flush=True)
+        return None
+
+    details = await asyncio.gather(*(fetch_player(identifier) for identifier in identifiers))
+    if any(data is None for data in details):
+        missing = [identifiers[i] for i, data in enumerate(details) if data is None]
+        await interaction.followup.send(
+            "Could not find these player IDs: " + ", ".join(missing),
+            ephemeral=True,
+        )
+        return
+
+    players = [data.get("player", {}) for data in details]
+
+    def kingdom_id(player):
+        value = player.get("kid") or player.get("kingdom_id") or player.get("kingdom")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    kingdoms = [kingdom_id(player) for player in players]
+
+    component_boards = [
+        ("research_power", "Research"),
+        ("gov_gear", "Gov. Gear"),
+        ("gov_charm", "Gov. Charm"),
+        ("pet_power", "Pet Power"),
+    ]
+
+    async def get_rank_index(kid):
+        index = {label: {} for _, label in component_boards}
+        if kid is None:
+            return index
+        results = await asyncio.gather(
+            *(
+                scanner.api.get(f"/kingdoms/{kid}/ranks?board={board}&limit=100")
+                for board, _ in component_boards
+            )
+        )
+        for (board, label), data in zip(component_boards, results):
+            rows = data.get("boards", [{}])[0].get("rows", [])[:100] if data else []
+            for row in rows:
+                score = row.get("score")
+                if score is None:
+                    continue
+                for key in ("governor_id", "uid"):
+                    value = row.get(key)
+                    if value is not None:
+                        index[label][str(value)] = score
+        return index
+
+    indexes = await asyncio.gather(*(get_rank_index(kid) for kid in kingdoms))
+
+    def component_value(player, index, label):
+        for key in ("governor_id", "uid"):
+            value = player.get(key)
+            if value is not None:
+                score = index.get(label, {}).get(str(value))
+                if score is not None:
+                    return score
+        return None
+
+    values = []
+    for player, data, index in zip(players, details, indexes):
+        ranks = data.get("ranks", {}) if isinstance(data, dict) else {}
+        values.append({
+            "mystic": ranks.get("mystic_trial"),
+            "mystic_rank": ranks.get("mystic_rank"),
+            "hero": player.get("hero_power"),
+            "research": component_value(player, index, "Research"),
+            "gear": component_value(player, index, "Gov. Gear"),
+            "charm": component_value(player, index, "Gov. Charm"),
+            "pet": component_value(player, index, "Pet Power"),
+        })
+
+    def alliance_tag(player):
+        alliance = player.get("alliance")
+        if isinstance(alliance, dict):
+            return alliance.get("abbr") or alliance.get("tag") or "-"
+        return player.get("alliance_tag") or player.get("alliance_abbr") or "-"
+
+    def metric_suffix(left, right, is_left):
+        if left is None and right is None:
+            return ""
+        if left is not None and right is not None:
+            if left > right:
+                return " ▲" if is_left else ""
+            if right > left:
+                return "" if is_left else " ▲"
+            return " ="
+        return " ▲" if ((left is not None) == is_left) else ""
+
+    def metric_lines(vals, other, right=False):
+        out = []
+        for label, key in (
+            ("Hero Power", "hero"),
+            ("Research", "research"),
+            ("Gov. Gear", "gear"),
+            ("Gov. Charm", "charm"),
+            ("Pet Power", "pet"),
+        ):
+            value = vals[key]
+            other_value = other[key]
+            shown = compact_number(value) if value is not None else "-"
+            suffix = metric_suffix(other_value, value, False) if right else metric_suffix(value, other_value, True)
+            out.append(f"    {label}: {shown}{suffix}")
+        return out
+
+    def hero_gear_summary(hero):
+        gear = hero.get("gear")
+        if not isinstance(gear, list):
+            return []
+        parts = []
+        for item in gear:
+            if not isinstance(item, dict):
+                continue
+            slot = item.get("slot") or item.get("name") or "Gear"
+            enh = item.get("enhancement_level")
+            ref = item.get("refine_level")
+            if enh is None and ref is None:
+                parts.append(f"{slot}")
+            elif ref is None:
+                parts.append(f"{slot} +{enh}")
+            elif enh is None:
+                parts.append(f"{slot} R{ref}")
+            else:
+                parts.append(f"{slot} +{enh}/R{ref}")
+        return parts
+
+    def hero_block(data, kid):
+        heroes = data.get("heroes") if isinstance(data, dict) else None
+        if not isinstance(heroes, list):
+            return [f"Heroes {kid}", "Unavailable"]
+        out = [f"Heroes {kid}"]
+        shown = 0
+        for position, hero in enumerate(heroes[:5], 1):
+            if not isinstance(hero, dict):
+                continue
+            shown += 1
+            out.append(f"{position}. {hero.get('name') or 'Unknown'}")
+            widget = hero.get("exclusive_gear_level")
+            out.append(f"   Widget: {widget if widget is not None else '-'}")
+            gear_parts = hero_gear_summary(hero)
+            if gear_parts:
+                out.extend(f"   {part}" for part in gear_parts)
+            else:
+                out.append("   Gear: unavailable")
+        if shown == 0:
+            out.append("Unavailable")
+        return out
+
+    lines = []
+    for i, (player, data, kid, vals) in enumerate(zip(players, details, kingdoms, values)):
+        tag = alliance_tag(player)
+        name = player.get("nick_name") or "Unknown"
+        kid_label = str(kid) if kid is not None else "?"
+        mystic = vals["mystic"] if vals["mystic"] is not None else "-"
+        rank = vals["mystic_rank"] if vals["mystic_rank"] is not None else "-"
+
+        lines.append(f"{kid_label} [{tag}]{name}")
+        lines.append(f"    {level_label(player.get('town_center_level'))}")
+        lines.append(f"    Mystic Trial: {mystic} · Rank: {rank}")
+        lines.extend(metric_lines(vals, values[1 - i], right=(i == 1)))
+
+        if i == 0:
+            lines.append("")
+        else:
+            lines.append("")
+            lines.extend(hero_block(details[0], kingdoms[0] if kingdoms[0] is not None else "?"))
+            lines.append("")
+            lines.extend(hero_block(details[1], kingdoms[1] if kingdoms[1] is not None else "?"))
+
+    output = "```text\n" + "\n".join(lines) + "\n```"
+    if len(output) <= 2000:
+        await interaction.followup.send(output, ephemeral=True)
+    else:
+        # Split only between complete lines, preserving the code-block format.
+        chunks = []
+        current = []
+        current_len = len("```text\n\n```")
+        for line in lines:
+            extra = len(line) + 1
+            if current and current_len + extra > 1900:
+                chunks.append("```text\n" + "\n".join(current) + "\n```")
+                current = []
+                current_len = len("```text\n\n```")
+            current.append(line)
+            current_len += extra
         if current:
             chunks.append("```text\n" + "\n".join(current) + "\n```")
         for chunk in chunks:

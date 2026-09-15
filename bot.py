@@ -1619,20 +1619,211 @@ async def dashboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="compare", description="Compare two tracked players")
-@app_commands.describe(first="First player ID/name", second="Second player ID/name")
-async def compare(interaction: discord.Interaction, first: str, second: str):
-    _, a = await resolve_player(first)
-    _, b = await resolve_player(second)
-    if not a or not b:
-        await interaction.response.send_message("Both players must be tracked.", ephemeral=True)
+@bot.tree.command(name="compare", description="Compare up to five players by ID")
+@app_commands.describe(
+    id1="First player ID (baseline)",
+    id2="Second player ID",
+    id3="Third player ID",
+    id4="Fourth player ID",
+    id5="Fifth player ID",
+)
+async def compare(
+    interaction: discord.Interaction,
+    id1: str,
+    id2: str,
+    id3: str,
+    id4: str,
+    id5: str,
+):
+    """Compare five individual players, with the first player as the baseline."""
+    await interaction.response.defer(ephemeral=True)
+
+    identifiers = [id1.strip(), id2.strip(), id3.strip(), id4.strip(), id5.strip()]
+    if any(not value for value in identifiers):
+        await interaction.followup.send("All five player IDs are required.", ephemeral=True)
         return
-    await interaction.response.send_message(
-        f"**{a['nick_name']} vs {b['nick_name']}**\n"
-        f"Power: {compact_number(a['power'])} vs {compact_number(b['power'])}\n"
-        f"Kills: {compact_number(a['kills'])} vs {compact_number(b['kills'])}\n"
-        f"TC: {level_label(a['town_center_level'])} vs {level_label(b['town_center_level'])}\n"
-        f"Alliance: {a['alliance_tag']} vs {b['alliance_tag']}", ephemeral=True)
+
+    async def fetch_player(identifier: str):
+        try:
+            data = await scanner.api.get_player_full(identifier, "governor_id")
+            if data and isinstance(data.get("player"), dict):
+                return data
+        except Exception as exc:
+            print(f"/compare lookup failed for {identifier}: {exc}", flush=True)
+        return None
+
+    details = await asyncio.gather(*(fetch_player(identifier) for identifier in identifiers))
+    if any(data is None for data in details):
+        missing = [identifiers[i] for i, data in enumerate(details) if data is None]
+        await interaction.followup.send(
+            "Could not find these player IDs: " + ", ".join(missing),
+            ephemeral=True,
+        )
+        return
+
+    players = [data.get("player", {}) for data in details]
+    kingdoms = []
+    for player in players:
+        kid = player.get("kid") or player.get("kingdom_id") or player.get("kingdom")
+        try:
+            kid = int(kid)
+        except (TypeError, ValueError):
+            kid = None
+        kingdoms.append(kid)
+
+    # Component powers are available through kingdom ranking boards. Fetch only
+    # the distinct kingdoms represented by the five players.
+    component_boards = [
+        ("research_power", "Research"),
+        ("gov_gear", "Gov. Gear"),
+        ("gov_charm", "Gov. Charm"),
+        ("pet_power", "Pet Power"),
+    ]
+
+    async def get_component_index(kingdom_id: int | None):
+        index = {label: {} for _, label in component_boards}
+        if kingdom_id is None:
+            return index
+        try:
+            results = await asyncio.gather(
+                *(
+                    scanner.api.get(
+                        f"/kingdoms/{kingdom_id}/ranks?board={board}&limit=100"
+                    )
+                    for board, _ in component_boards
+                )
+            )
+            for (board, label), data in zip(component_boards, results):
+                rows = data.get("boards", [{}])[0].get("rows", [])[:100] if data else []
+                for row in rows:
+                    score = row.get("score")
+                    if score is None:
+                        continue
+                    for key in ("governor_id", "uid"):
+                        value = row.get(key)
+                        if value is not None:
+                            index[label][str(value)] = score
+        except Exception as exc:
+            print(f"/compare component lookup failed for kingdom {kingdom_id}: {exc}", flush=True)
+        return index
+
+    unique_kids = sorted({kid for kid in kingdoms if kid is not None})
+    index_results = await asyncio.gather(*(get_component_index(kid) for kid in unique_kids))
+    component_indexes = dict(zip(unique_kids, index_results))
+
+    def component_value(player, kingdom_id, label):
+        index = component_indexes.get(kingdom_id, {})
+        for key in ("governor_id", "uid"):
+            value = player.get(key)
+            if value is not None:
+                score = index.get(label, {}).get(str(value))
+                if score is not None:
+                    return score
+        return None
+
+    metric_names = ("Mystic Trial", "Hero Power", "Research", "Gov. Gear", "Gov. Charm", "Pet Power")
+
+    def numeric(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def marker(value, baseline):
+        current = numeric(value)
+        base = numeric(baseline)
+        if current is None and base is None:
+            return " ="
+        if current is None:
+            return " ▼"
+        if base is None:
+            return " ▲"
+        if current > base:
+            return " ▲"
+        if current < base:
+            return " ▼"
+        return " ="
+
+    values = []
+    for idx, (player, kid) in enumerate(zip(players, kingdoms)):
+        ranks = details[idx].get("ranks", {}) if isinstance(details[idx], dict) else {}
+        values.append({
+            "mystic": ranks.get("mystic_trial"),
+            "hero": player.get("hero_power"),
+            "research": component_value(player, kid, "Research"),
+            "gear": component_value(player, kid, "Gov. Gear"),
+            "charm": component_value(player, kid, "Gov. Charm"),
+            "pet": component_value(player, kid, "Pet Power"),
+        })
+
+    baseline = values[0]
+
+    def alliance_tag(player):
+        alliance = player.get("alliance")
+        if isinstance(alliance, dict):
+            return alliance.get("abbr") or alliance.get("tag") or "-"
+        return player.get("alliance_tag") or player.get("alliance_abbr") or "-"
+
+    def display_metric(label, value, base_value, power=False):
+        if value is None:
+            shown = "-"
+        elif power:
+            shown = compact_number(value)
+        else:
+            shown = str(value)
+        return f"    {label}: {shown}{marker(value, base_value)}"
+
+    lines = []
+    for i, (player, kid, player_values) in enumerate(zip(players, kingdoms, values)):
+        name = player.get("nick_name") or "Unknown"
+        tag = alliance_tag(player)
+        kingdom_label = str(kid) if kid is not None else "?"
+        lines.append(f"{kingdom_label} [{tag}]{name}")
+        lines.append(f"    {level_label(player.get('town_center_level'))}")
+
+        if i == 0:
+            # The first player is the comparison baseline and therefore has no
+            # arrows, exactly as requested.
+            mystic = player_values["mystic"] if player_values["mystic"] is not None else "-"
+            lines.append(f"    Mystic Trial: {mystic}")
+            lines.append(display_metric("Hero Power", player_values["hero"], None, True).replace(" =", "").replace(" ▲", "").replace(" ▼", ""))
+            lines.append(display_metric("Research", player_values["research"], None, True).replace(" =", "").replace(" ▲", "").replace(" ▼", ""))
+            lines.append(display_metric("Gov. Gear", player_values["gear"], None, True).replace(" =", "").replace(" ▲", "").replace(" ▼", ""))
+            lines.append(display_metric("Gov. Charm", player_values["charm"], None, True).replace(" =", "").replace(" ▲", "").replace(" ▼", ""))
+            lines.append(display_metric("Pet Power", player_values["pet"], None, True).replace(" =", "").replace(" ▲", "").replace(" ▼", ""))
+        else:
+            mystic = player_values["mystic"] if player_values["mystic"] is not None else "-"
+            lines.append(f"    Mystic Trial: {mystic}{marker(player_values['mystic'], baseline['mystic'])}")
+            lines.append(display_metric("Hero Power", player_values["hero"], baseline["hero"], True))
+            lines.append(display_metric("Research", player_values["research"], baseline["research"], True))
+            lines.append(display_metric("Gov. Gear", player_values["gear"], baseline["gear"], True))
+            lines.append(display_metric("Gov. Charm", player_values["charm"], baseline["charm"], True))
+            lines.append(display_metric("Pet Power", player_values["pet"], baseline["pet"], True))
+        if i != len(players) - 1:
+            lines.append("")
+
+    output = "```text\n" + "\n".join(lines) + "\n```"
+    # Keep the requested five-player comparison together when Discord permits it.
+    if len(output) <= 2000:
+        await interaction.followup.send(output, ephemeral=True)
+    else:
+        # Discord's message limit is 2000 characters, because apparently even
+        # text boxes require paperwork. Preserve the format across chunks.
+        chunks = []
+        current = []
+        current_len = len("```text\n```")
+        for line in lines:
+            add_len = len(line) + 1
+            if current and current_len + add_len > 2000:
+                chunks.append("```text\n" + "\n".join(current) + "\n```")
+                current = []
+                current_len = len("```text\n```")
+            current.append(line)
+            current_len += add_len
+        if current:
+            chunks.append("```text\n" + "\n".join(current) + "\n```")
+        for chunk in chunks:
+            await interaction.followup.send(chunk, ephemeral=True)
 
 
 @bot.tree.command(name="watch", description="Watch a player for future changes")

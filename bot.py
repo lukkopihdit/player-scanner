@@ -1987,7 +1987,10 @@ async def compare_detail(interaction: discord.Interaction, id1: str, id2: str):
         for item in gear:
             if not isinstance(item, dict):
                 continue
-            slot = item.get("slot") or item.get("name") or "Gear"
+            # Hero gear is descriptive equipment data, not a comparison metric.
+            # Never attach comparison markers (▲/▼/=) to these lines.
+            slot = str(item.get("slot") or item.get("name") or "Gear")
+            slot = slot.replace("▲", "").replace("▼", "").replace("=", "").strip()
             enh = item.get("enhancement_level")
             ref = item.get("refine_level")
             if enh is None and ref is None:
@@ -2737,7 +2740,10 @@ async def kvkopponent(
             for item in gear:
                 if not isinstance(item, dict):
                     continue
-                slot = item.get("slot") or item.get("name") or "Gear"
+                # Hero gear is descriptive equipment data, not a comparison metric.
+                # Never attach comparison markers (▲/▼/=) to these lines.
+                slot = str(item.get("slot") or item.get("name") or "Gear")
+                slot = slot.replace("▲", "").replace("▼", "").replace("=", "").strip()
                 enh = item.get("enhancement_level")
                 ref = item.get("refine_level")
                 if enh is None and ref is None:

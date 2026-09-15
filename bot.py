@@ -998,6 +998,33 @@ async def notify_rank_alerts(rows):
         await channel.send(f"**Kingdom 810 alliance rank movement**\n{row['abbr']}: **#{row['old_rank']} → #{row['new_rank']}**")
 
 
+async def confirm_kingdom_departures(candidates):
+    """Verify players missing from the tracked top-100 roster via the documented player API.
+
+    A player is reported as having left Kingdom 810 only when the direct player
+    lookup succeeds and its current kid is different from KINGDOM_ID.
+    Missing/failed lookups are treated as unknown and are not reported.
+    """
+    if not candidates or not scanner.api:
+        return []
+
+    async def check(row):
+        record = await scanner.api.get_player_full(str(row["governor_id"]))
+        if not isinstance(record, dict):
+            return None
+        if isinstance(record.get("player"), dict):
+            record = record["player"]
+        elif isinstance(record.get("data"), dict) and isinstance(record["data"].get("player"), dict):
+            record = record["data"]["player"]
+        kid = record.get("kid")
+        if kid is None or str(kid) == str(KINGDOM_ID):
+            return None
+        return row
+
+    results = await asyncio.gather(*(check(row) for row in candidates), return_exceptions=True)
+    return [row for row in results if isinstance(row, dict)]
+
+
 async def send_report(report_type: str):
     channel_id = DAILY_REPORT_CHANNEL_ID if report_type == "daily" else WEEKLY_REPORT_CHANNEL_ID
     if not channel_id:
@@ -1016,7 +1043,14 @@ async def send_report(report_type: str):
     namechanges = [c for c in changes if c["change_type"] == "name"]
     alliance_changes = [c for c in changes if c["change_type"] == "alliance"]
     joins = [c for c in changes if c["change_type"] == "joined_tracked"]
-    departures = [c for c in changes if c["change_type"] == "left_tracked"]
+    left_tracked = [c for c in changes if c["change_type"] == "left_tracked"]
+    # A player disappearing from the top-100 alliance roster does not prove they
+    # left the kingdom. Verify each candidate by Governor ID through the documented
+    # MightPulse player API before reporting a kingdom departure.
+    unique_candidates = {}
+    for c in left_tracked:
+        unique_candidates[str(c["governor_id"])] = c
+    departures = await confirm_kingdom_departures(list(unique_candidates.values()))
     power = await scanner.db.power_changes(hours, 5)
     alliances = await scanner.db.get_alliances(100)
 
@@ -1031,7 +1065,7 @@ async def send_report(report_type: str):
     embed.add_field(name="Name changes", value=str(len(namechanges)), inline=True)
     embed.add_field(name="Alliance changes", value=str(len(alliance_changes)), inline=True)
     embed.add_field(name="Joined tracked", value=str(len(joins)), inline=True)
-    embed.add_field(name="Left tracked", value=str(len(departures)), inline=True)
+    embed.add_field(name="Left kingdom", value=str(len(departures)), inline=True)
     if power:
         growth = "\n".join(f"{i+1}. {r['nick_name']} · {compact_number(r['growth'])}" for i, r in enumerate(power))
     else:
@@ -1040,6 +1074,24 @@ async def send_report(report_type: str):
     if last_scan:
         embed.set_footer(text=f"Last scan: {last_scan[0]}")
     await channel.send(embed=embed)
+
+    if report_type == "daily" and departures:
+        lines = ["**Players confirmed to have left Kingdom 810 in the last 24 hours**"]
+        for row in departures:
+            lines.append(f"{row['nick_name']} · `{row['governor_id']}` · {row['alliance_tag']}")
+        # Keep each Discord message below the 2,000-character limit.
+        chunks = []
+        current = lines[0]
+        for line in lines[1:]:
+            if len(current) + 1 + len(line) > 1900:
+                chunks.append(current)
+                current = line
+            else:
+                current += "\n" + line
+        chunks.append(current)
+        for chunk in chunks:
+            await channel.send(chunk)
+
     await scanner.db.mark_report(report_type)
 
 

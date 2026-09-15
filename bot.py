@@ -1631,16 +1631,16 @@ async def compare(
     interaction: discord.Interaction,
     id1: str,
     id2: str,
-    id3: str,
-    id4: str,
-    id5: str,
+    id3: str | None = None,
+    id4: str | None = None,
+    id5: str | None = None,
 ):
     """Compare five individual players, with the first player as the baseline."""
     await interaction.response.defer(ephemeral=True)
 
-    identifiers = [id1.strip(), id2.strip(), id3.strip(), id4.strip(), id5.strip()]
-    if any(not value for value in identifiers):
-        await interaction.followup.send("All five player IDs are required.", ephemeral=True)
+    identifiers = [value.strip() for value in (id1, id2, id3, id4, id5) if value and value.strip()]
+    if len(identifiers) < 2:
+        await interaction.followup.send("Provide at least 2 player IDs.", ephemeral=True)
         return
 
     async def fetch_player(identifier: str):
